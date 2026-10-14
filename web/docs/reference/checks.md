@@ -93,9 +93,22 @@ feature names, then `X_train.columns`.
 ### `feature_drift`
 
 Train-serve skew: a feature whose distribution has moved between the two
-frames. Numeric features are compared by standardised mean shift (unitless);
-categorical features by total variation distance between their frequency
-tables.
+frames. `drift_statistic` chooses how:
+
+- `"standardised_shift"` (default) — numeric features by standardised mean
+  shift (unitless); categorical features by total variation distance between
+  their frequency tables.
+- `"psi"` — the Population Stability Index, scored identically for numeric
+  and categorical features, against its own conventional bands:
+  `psi_moderate_threshold` (0.10, "worth a look") and
+  `psi_significant_threshold` (0.25, raises `DRIFT_RISK`). A numeric feature
+  is cut into `psi_bins` quantile bins (deciles by default) using edges from
+  the *training* distribution, so a live value outside that range still
+  lands in the nearest bin; a categorical feature's existing levels are the
+  bins. A feature in the 0.10 band that never crosses 0.25 is still named in
+  an otherwise-clean result's detail and metadata — PSI's value over the
+  default statistic is in catching drift at that earlier point, not only
+  once it is severe.
 
 **Non-blocking**, unlike its four neighbours. An out-of-time holdout *should*
 differ a little — that is the point of one — so drift warrants a look rather

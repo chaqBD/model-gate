@@ -18,6 +18,7 @@ import pytest
 
 from bdp_model_gate import ModelGate, StructuredGateContext
 from bdp_model_gate.config import ComplianceConfig, ValidationConfig
+from bdp_model_gate.exceptions import GateConfigurationError
 from bdp_model_gate.stats import average_ranks, pearson_r, rank_auc
 from bdp_model_gate.structured.validation_checks import (
     FeatureContractCheck,
@@ -458,6 +459,94 @@ def test_drift_skips_without_a_training_frame():
     (result,) = FeatureDriftCheck().run(_context(X, y, y_pred))
     assert result.flag == "NOT_APPLICABLE"
     assert "X_train" in result.detail
+
+
+# --------------------------------------------------------------------------
+# FeatureDriftCheck — drift_statistic="psi"
+# --------------------------------------------------------------------------
+
+
+def _psi_check(**overrides):
+    return FeatureDriftCheck(ValidationConfig(drift_statistic="psi", **overrides))
+
+
+def test_an_unrecognised_drift_statistic_is_refused_at_construction():
+    with pytest.raises(GateConfigurationError):
+        FeatureDriftCheck(ValidationConfig(drift_statistic="ks_test"))
+
+
+def test_psi_is_computed_by_hand_for_a_categorical_shift():
+    """50/50 in training, 90/10 live. PSI = sum((live-train) * ln(live/train))
+    over the two levels — worked by hand below, not just asserted against the
+    implementation that produces it."""
+    n = 1000
+    train = pd.DataFrame({"region": ["A"] * 500 + ["B"] * 500})
+    live = pd.DataFrame({"region": ["A"] * 900 + ["B"] * 100})
+    y = np.tile([0, 1], n // 2)
+    (result,) = _psi_check().run(_context(live, y, y.astype(float), X_train=train))
+
+    expected = (0.9 - 0.5) * np.log(0.9 / 0.5) + (0.1 - 0.5) * np.log(0.1 / 0.5)
+    assert result.flag == "DRIFT_RISK"
+    assert result.metadata["measure"] == "PSI"
+    assert result.metadata["shift"] == pytest.approx(round(expected, 4))
+
+
+def test_psi_moderate_band_is_reported_without_flagging():
+    """Same shift, read against PSI's own bands: 0.169 sits between 0.10 and
+    0.25 — 'worth a look', not a finding — and is named in the OK detail
+    rather than silently absorbed into it."""
+    n = 1000
+    train = pd.DataFrame({"region": ["A"] * 700 + ["B"] * 300})
+    live = pd.DataFrame({"region": ["A"] * 500 + ["B"] * 500})
+    y = np.tile([0, 1], n // 2)
+
+    result = _psi_check(psi_significant_threshold=0.30).run(
+        _context(live, y, y.astype(float), X_train=train)
+    )[0]
+    assert result.flag == "OK"
+    assert "region" in result.detail
+    assert result.metadata["moderate_band"] == [{"feature": "region", "psi": 0.1695}]
+
+
+def test_psi_flags_a_strongly_shifted_numeric_feature():
+    rng = np.random.default_rng(7)
+    train = pd.DataFrame({"income": rng.normal(size=4000)})
+    live = pd.DataFrame({"income": rng.normal(loc=2.0, size=4000)})
+    y = rng.integers(0, 2, 4000)
+    (result,) = _psi_check().run(_context(live, y, y.astype(float), X_train=train))
+    assert result.flag == "DRIFT_RISK"
+    assert result.metadata["measure"] == "PSI"
+    assert result.metadata["shift"] > 0.25
+
+
+def test_psi_does_not_flag_two_identical_samples():
+    rng = np.random.default_rng(3)
+    train = pd.DataFrame({"income": rng.normal(size=4000)})
+    live = pd.DataFrame({"income": rng.normal(size=4000)})
+    y = rng.integers(0, 2, 4000)
+    results = _psi_check().run(_context(live, y, y.astype(float), X_train=train))
+    assert [r.flag for r in results] == ["OK"]
+    assert "moderate_band" not in results[0].metadata
+
+
+def test_psi_numeric_handles_a_live_value_outside_the_training_range():
+    """Bin edges come from the training quantiles; a live value beyond them
+    must land in the nearest bin rather than becoming NaN and vanishing from
+    the proportions."""
+    rng = np.random.default_rng(11)
+    train = pd.DataFrame({"x": rng.normal(size=2000)})
+    live = pd.DataFrame({"x": np.concatenate([rng.normal(size=1990), [50.0] * 10])})
+    y = rng.integers(0, 2, 2000)
+    results = _psi_check().run(_context(live, y, y.astype(float), X_train=train))
+    assert results[0].metadata["n_features_scored"] == 1
+
+
+def test_psi_default_statistic_is_unchanged_for_backwards_compatibility():
+    assert ValidationConfig().drift_statistic == "standardised_shift"
+    X, y, y_pred = _frame()
+    drifted = X.assign(income=X["income"] * 2.0)
+    (result,) = FeatureDriftCheck().run(_context(drifted, y, y_pred, X_train=X))
+    assert result.metadata["measure"] == "standardised mean shift"
 
 
 # --------------------------------------------------------------------------

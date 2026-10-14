@@ -35,6 +35,7 @@ from .._logging import get_logger
 from ..classes import favourable_mask, resolve_favourable
 from ..config import ComplianceConfig, ValidationConfig
 from ..core.base import BaseCheck, CheckResult
+from ..exceptions import GateConfigurationError
 from ..metrics import to_class_labels
 from ..stats import correlation_ratio, pearson_r, rank_auc
 from ..task import MULTICLASS, REGRESSION, resolve_task
@@ -43,6 +44,12 @@ logger = get_logger("validation_checks")
 
 #: Below this many usable rows a per-feature statistic is noise, not evidence.
 _MIN_ROWS = 20
+#: `ValidationConfig.drift_statistic` accepts only these.
+_DRIFT_STATISTICS = ("standardised_shift", "psi")
+#: Floor applied to a bin's proportion before taking its log, so an empty bin
+#: in either frame doesn't divide by zero or take log(0). Standard fix for
+#: this statistic; at 1e-4 it cannot move a verdict near either PSI band.
+_PSI_EPSILON = 1e-4
 
 
 def _not_applicable(check: BaseCheck, reason: str) -> list[CheckResult]:
@@ -602,9 +609,23 @@ class FeatureDriftCheck(BaseCheck):
     Non-blocking for that reason. Drift warrants a look, not a hard stop, and
     a gate that fails the build on every seasonal shift gets switched off.
 
-    Numeric features are compared by standardised mean shift, so the threshold
-    is unitless. Categorical features are compared by total variation distance
-    between their frequency tables.
+    Two statistics, chosen by `ValidationConfig.drift_statistic`:
+
+    - `"standardised_shift"` (default) — a numeric feature is compared by
+      standardised mean shift, so the threshold is unitless; a categorical
+      feature by total variation distance between frequency tables.
+    - `"psi"` — the Population Stability Index, the measure credit-risk
+      auditors recognise by name, with the convention's own fixed bands
+      (0.10 "worth a look", 0.25 "significant") applying to numeric and
+      categorical features alike. A numeric feature is cut into
+      `psi_bins` quantile bins (deciles, by default) using edges taken from
+      the *training* distribution, so a live value outside that range still
+      falls in the nearest bin rather than being dropped; a categorical
+      feature uses its existing category levels as the bins, no cutting
+      needed. A feature that reaches the 0.10 band without crossing 0.25 is
+      still surfaced, alongside an otherwise-clean result, rather than
+      silently folded into `OK` — catching drift at 0.10, before it becomes
+      severe, is the reason to reach for PSI over the default statistic.
     """
 
     name = "feature_drift"
@@ -613,6 +634,11 @@ class FeatureDriftCheck(BaseCheck):
 
     def __init__(self, config: ValidationConfig | None = None):
         self.config = config or ValidationConfig()
+        if self.config.drift_statistic not in _DRIFT_STATISTICS:
+            raise GateConfigurationError(
+                f"validation.drift_statistic={self.config.drift_statistic!r} — must be "
+                f"one of {', '.join(_DRIFT_STATISTICS)}"
+            )
 
     def _numeric_shift(self, train: pd.Series, live: pd.Series) -> float | None:
         spread = float(train.std())
@@ -620,10 +646,15 @@ class FeatureDriftCheck(BaseCheck):
             return None  # constant in training; a shift has no scale to be measured against
         return abs(float(live.mean()) - float(train.mean())) / spread
 
-    def _categorical_shift(self, train: pd.Series, live: pd.Series) -> float:
+    @staticmethod
+    def _shares(train: pd.Series, live: pd.Series) -> tuple[pd.Series, pd.Series, pd.Index]:
         train_share = train.value_counts(normalize=True)
         live_share = live.value_counts(normalize=True)
         levels = train_share.index.union(live_share.index)
+        return train_share, live_share, levels
+
+    def _categorical_shift(self, train: pd.Series, live: pd.Series) -> float:
+        train_share, live_share, levels = self._shares(train, live)
         return float(
             0.5
             * sum(
@@ -631,6 +662,36 @@ class FeatureDriftCheck(BaseCheck):
                 for level in levels
             )
         )
+
+    @staticmethod
+    def _psi_from_shares(train_share: pd.Series, live_share: pd.Series, levels) -> float:
+        """PSI over aligned proportion tables, flooring each at `_PSI_EPSILON`
+        first so an empty bin in either frame cannot divide by zero or take
+        log(0) — the standard fix, and at this floor it cannot itself move a
+        verdict near either band."""
+        train_p = np.array(
+            [max(float(train_share.get(level, 0.0)), _PSI_EPSILON) for level in levels]
+        )
+        live_p = np.array(
+            [max(float(live_share.get(level, 0.0)), _PSI_EPSILON) for level in levels]
+        )
+        return float(np.sum((live_p - train_p) * np.log(live_p / train_p)))
+
+    def _psi_categorical(self, train: pd.Series, live: pd.Series) -> float:
+        train_share, live_share, levels = self._shares(train, live)
+        return self._psi_from_shares(train_share, live_share, levels)
+
+    def _psi_numeric(self, train: pd.Series, live: pd.Series, bins: int) -> float | None:
+        edges = np.unique(train.quantile(np.linspace(0.0, 1.0, bins + 1)).to_numpy())
+        if len(edges) < 2:
+            return None  # constant in training; no spread to bin on
+        edges = edges.astype(float)
+        edges[0], edges[-1] = -np.inf, np.inf
+        train_binned = pd.cut(train, bins=edges, include_lowest=True)
+        live_binned = pd.cut(live, bins=edges, include_lowest=True)
+        train_share = train_binned.value_counts(normalize=True)
+        live_share = live_binned.value_counts(normalize=True)
+        return self._psi_from_shares(train_share, live_share, train_share.index)
 
     def run(self, context) -> list[CheckResult]:
         train = context.X_train
@@ -647,13 +708,23 @@ class FeatureDriftCheck(BaseCheck):
                 self, "X and X_train share no column names — see the feature_contract check"
             )
 
-        drifted, scored = [], 0
+        use_psi = self.config.drift_statistic == "psi"
+        drifted, moderate, scored = [], [], 0
         for feature in shared:
             reference, live = train[feature].dropna(), context.X[feature].dropna()
             if len(reference) < _MIN_ROWS or len(live) < _MIN_ROWS:
                 continue
             numeric = reference.dtype.kind in "if" and live.dtype.kind in "if"
-            if numeric:
+
+            if use_psi:
+                shift = (
+                    self._psi_numeric(reference, live, self.config.psi_bins)
+                    if numeric
+                    else self._psi_categorical(reference, live)
+                )
+                limit = self.config.psi_significant_threshold
+                unit = "PSI"
+            elif numeric:
                 shift = self._numeric_shift(reference, live)
                 limit = self.config.drift_threshold
                 unit = "standardised mean shift"
@@ -661,11 +732,14 @@ class FeatureDriftCheck(BaseCheck):
                 shift = self._categorical_shift(reference, live)
                 limit = self.config.categorical_drift_threshold
                 unit = "total variation distance"
+
             if shift is None:
                 continue
             scored += 1
             if shift > limit:
                 drifted.append((feature, shift, limit, unit))
+            elif use_psi and shift >= self.config.psi_moderate_threshold:
+                moderate.append((feature, shift))
 
         if not scored:
             return _not_applicable(
@@ -673,14 +747,26 @@ class FeatureDriftCheck(BaseCheck):
                 f"no shared feature had at least {_MIN_ROWS} usable rows in both frames",
             )
         if not drifted:
+            detail = f"no drift above threshold across {scored} shared feature(s)"
+            metadata: dict = {"n_features_scored": scored}
+            if moderate:
+                moderate.sort(key=lambda pair: -pair[1])
+                named = ", ".join(f"{feature} ({psi:.3f})" for feature, psi in moderate)
+                detail += (
+                    f"; {len(moderate)} sit in PSI's 0.10–0.25 'moderate' band, worth "
+                    f"a look before it becomes significant: {named}"
+                )
+                metadata["moderate_band"] = [
+                    {"feature": feature, "psi": round(psi, 4)} for feature, psi in moderate
+                ]
             return [
                 CheckResult(
                     self.name,
                     self.category,
                     "OK",
-                    f"no drift above threshold across {scored} shared feature(s)",
+                    detail,
                     self.blocking,
-                    metadata={"n_features_scored": scored},
+                    metadata=metadata,
                 )
             ]
 

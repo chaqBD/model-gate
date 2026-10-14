@@ -6,6 +6,51 @@ All notable changes to this project are documented here. Format follows
 
 ## [Unreleased]
 
+A drift statistic auditors already have a name for.
+
+`FeatureDriftCheck` compared train and validation distributions by
+standardised mean shift (numeric) or total variation distance (categorical) —
+sound statistics, but not the ones a credit-risk or model-governance review
+goes looking for by name. The Population Stability Index is: a model
+monitoring report that doesn't carry it reads as incomplete to that audience,
+whatever else it measures.
+
+### Added
+- **`ValidationConfig.drift_statistic`** — `"standardised_shift"` (default,
+  unchanged behaviour) or `"psi"`. Under `"psi"`, `FeatureDriftCheck` scores
+  every shared feature — numeric and categorical alike — on the Population
+  Stability Index, with the convention's own fixed bands: 0.10 ("worth a
+  look") and 0.25 ("significant", and what raises `DRIFT_RISK`). A numeric
+  feature is cut into `psi_bins` quantile bins (deciles by default) using
+  edges taken from the *training* distribution, so a live value outside that
+  range still falls in the nearest bin rather than vanishing from the
+  proportions; a categorical feature uses its existing category levels as the
+  bins directly; both compute through one shared implementation, because PSI
+  is defined identically over any two aligned proportion tables.
+- A feature sitting in the 0.10 band without crossing 0.25 is named in the
+  result's detail and metadata rather than silently folded into it — the
+  moderate band is the point of reaching for PSI over the default statistic:
+  catching drift before it becomes severe, not after.
+- The significant-threshold verdict is bootstrapped, like the twelve other
+  interval-aware checks: binned PSI is biased upward on small samples, and an
+  interval straddling 0.25 now reads `UNCERTAIN` rather than a confident
+  `DRIFT_RISK` two identical distributions can trip most of the time at
+  n=20-50.
+- An unrecognised `drift_statistic` is rejected with `GateConfigurationError`
+  as soon as the check is constructed, the same convention
+  `UncertaintyConfig.on_uncertain` already follows — and so is `psi_bins < 2`
+  or `psi_moderate_threshold > psi_significant_threshold`.
+- Three new `ValidationConfig` fields: `psi_bins` (10), `psi_moderate_threshold`
+  (0.10), `psi_significant_threshold` (0.25).
+
+### Fixed
+- `FeatureDriftCheck` now scores unsigned-integer and boolean columns as
+  numeric, not just signed ones — a gap the default statistic already had,
+  louder under PSI because every distinct value became its own bin.
+- A category present in live data but never seen in training is now reported
+  as its own finding rather than folded into PSI through a floor constant
+  that decided the verdict on its own.
+
 ## [0.7.0] - 2026-10-15
 
 Champion against challenger — and making the mutation score mean what it says.
