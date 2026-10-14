@@ -1,6 +1,6 @@
 # The checks
 
-Thirty-three built-in checks across six categories. Each declares a
+Thirty-four built-in checks across six categories. Each declares a
 **category**, whether it is **blocking**, and which **tasks** it supports.
 Sixteen also draw a chart — see [Plots](plots.md).
 
@@ -19,12 +19,13 @@ model had memorised.
 | Check | Needs | Flags |
 |---|---|---|
 | `target_leakage` | `y_true`, `y_pred` | `LEAKAGE_RISK` |
+| `combined_feature_leakage` | `y_true`, `y_pred` | `COMBINED_LEAKAGE_RISK` |
 | `split_overlap` | `X_train` for the overlap half | `SPLIT_OVERLAP_RISK`, `DUPLICATE_ROWS_RISK` |
 | `validation_strategy` | `model_card` | `VALIDATION_STRATEGY_RISK` |
 | `feature_contract` | `X_train` or `expected_features` | `FEATURE_CONTRACT_RISK`, `FEATURE_ORDER_RISK` |
 | `feature_drift` | `X_train` | `DRIFT_RISK` (non-blocking) |
 
-All five work on a **core install**. A validation set that is secretly the
+All six work on a **core install**. A validation set that is secretly the
 training set is the last thing that should go unchecked because scikit-learn
 is missing.
 
@@ -47,6 +48,39 @@ feature scoring 0.54 reaches 98% of it and means nothing.
 Near-unique string columns are skipped rather than scored, since an
 identifier puts every row in its own group and drives the statistic to 1 by
 arithmetic.
+
+### `combined_feature_leakage`
+
+Does a small *combination* of columns do what the whole model does, even
+though none of them does alone? `target_leakage` asks the question for one
+column at a time, which misses a leak split across several
+individually-unremarkable columns.
+
+That gap is not hypothetical. The public DataCo Supply Chain dataset's
+`Late_delivery_risk` label is defined by comparing two of its own columns —
+the scheduled shipping window against the realised one. Scored
+individually, each reaches power 0.40, half of `target_leakage`'s 0.80
+floor. Their difference alone reaches 0.94, and a sign rule built from it
+scores 97.5% accuracy on the full dataset, because that comparison is how
+the label was derived. A model trained on both columns as features
+benchmarks at 0.974 ROC AUC; the same model without the realised-time
+column benchmarks at 0.731. Full numbers, a runnable reproduction, and a
+live demo: [chaqBD/bdp-gate-DataCo](https://github.com/chaqBD/bdp-gate-DataCo).
+
+For every candidate pair (and, if `combined_leakage_combo_sizes` is widened,
+triple) of numeric columns, a plain least-squares combination is fit and
+scored **out-of-fold** — on a fit that never saw the row it scores, so a
+flag reflects reusable signal rather than a fit's freedom to find *some*
+line through the data — on the same 0–1 power scale `target_leakage` uses.
+Fold assignment is derived from row content rather than position, so
+permuting the validation frame cannot change a verdict.
+
+A column `target_leakage` would already flag alone is dropped from the
+candidate pool by default (`combined_leakage_skip_covered_features`), so
+every finding here is something that check could not have told you. Past
+`combined_leakage_max_features` candidate columns, only the ones with the
+highest individual power are combined, the same trade-off
+`proxy_correlation`'s own comparison grid makes.
 
 ### `split_overlap`
 

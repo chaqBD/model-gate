@@ -216,6 +216,30 @@ class ValidationConfig:
     #: `ComplianceConfig`.
     require_out_of_time_for_high_risk: bool = True
 
+    # --- CombinedFeatureLeakageCheck ---------------------------------------
+    # `leakage_ratio` and `leakage_min_power` above are reused as this
+    # check's threshold too, deliberately: the question is identical
+    # ("does this do what the model does?"), only what is being measured —
+    # one column versus a small combination — differs, and the two checks
+    # should agree on what counts as suspicious.
+    #: Column-subset sizes CombinedFeatureLeakageCheck tests. (2,) by
+    #: default; adding 3 costs roughly `combined_leakage_max_features` times
+    #: as many fits as pairs do.
+    combined_leakage_combo_sizes: tuple[int, ...] = (2,)
+    #: Folds for the out-of-fold power estimate a combination is scored
+    #: with — never in-sample, so a flag is not itself a smaller version of
+    #: the overfitting mistake it exists to catch.
+    combined_leakage_cv_folds: int = 5
+    #: Above this many numeric candidate columns, only the ones with the
+    #: highest *individual* power are combined, the same trade-off
+    #: `ProxyCorrelationCheck` makes for its own comparison grid.
+    combined_leakage_max_features: int = 30
+    #: Drop a column from the candidate pool once it alone would already
+    #: trip `LeakageCheck` (reaches `leakage_min_power` and
+    #: `leakage_ratio * model_power`) — keeps this check's findings disjoint
+    #: from that one's.
+    combined_leakage_skip_covered_features: bool = True
+
 
 @dataclass
 class UncertaintyConfig:

@@ -11,22 +11,27 @@ finding says *you do not yet know whether it is*, which is a different
 sentence and a strictly prior one — so `validation` is reported first, and
 these checks block.
 
-Five questions:
+Six questions:
 
     LeakageCheck             Does one column do what the whole model does?
+    CombinedFeatureLeakageCheck  Does a small *combination* of columns do
+                             what the whole model does, even though none of
+                             them does alone?
     SplitOverlapCheck        Has the model already seen these rows?
     ValidationStrategyCheck  Was the holdout separated in time, or at random?
     FeatureContractCheck     Are the columns the ones the model was fitted on,
                              in the order it expects them?
     FeatureDriftCheck        Does validation still look like training?
 
-All five degrade to `NOT_APPLICABLE` with a reason when their inputs are
-absent, and all five work on a core install — a validation set that is
+All six degrade to `NOT_APPLICABLE` with a reason when their inputs are
+absent, and all six work on a core install — a validation set that is
 secretly the training set is the last thing that should go unchecked because
 scikit-learn is missing.
 """
 
 from __future__ import annotations
+
+from itertools import combinations
 
 import numpy as np
 import pandas as pd
@@ -37,12 +42,17 @@ from ..config import ComplianceConfig, ValidationConfig
 from ..core.base import BaseCheck, CheckResult
 from ..metrics import to_class_labels
 from ..stats import correlation_ratio, pearson_r, rank_auc
-from ..task import MULTICLASS, REGRESSION, resolve_task
+from ..task import ALL_TASKS, MULTICLASS, REGRESSION, resolve_task
+from ..uncertainty import canonical_order
 
 logger = get_logger("validation_checks")
 
 #: Below this many usable rows a per-feature statistic is noise, not evidence.
 _MIN_ROWS = 20
+#: A combination needs enough rows per cross-validation fold for the fit
+#: itself to mean anything, not just enough rows overall — stricter than
+#: _MIN_ROWS for exactly that reason. See CombinedFeatureLeakageCheck.
+_MIN_ROWS_PER_FOLD = 10
 
 
 def _not_applicable(check: BaseCheck, reason: str) -> list[CheckResult]:
@@ -243,6 +253,265 @@ class LeakageCheck(BaseCheck):
                 },
             )
             for feature, power in sorted(suspects, key=lambda pair: -pair[1])
+        ]
+
+
+def _already_covered(power: float | None, model_power: float, config: ValidationConfig) -> bool:
+    """Whether LeakageCheck would already flag this column alone — the test
+    CombinedFeatureLeakageCheck uses to keep its findings disjoint from
+    LeakageCheck's."""
+    if power is None:
+        return False
+    return power >= config.leakage_min_power and power >= config.leakage_ratio * model_power
+
+
+def _fold_ids(frame: pd.DataFrame, k: int) -> np.ndarray:
+    """Deterministic, order-invariant fold id (0..k-1) per row.
+
+    Built from `canonical_order` — rows sorted by content, not position — the
+    same ordering the bootstrap in `bdp_model_gate.uncertainty` resamples
+    over, so permuting the validation frame cannot move a row into a
+    different fold and therefore cannot change the verdict.
+    """
+    order = canonical_order(frame)
+    fold_of_position = np.empty(len(frame), dtype=int)
+    fold_of_position[order] = np.arange(len(frame)) % k
+    return fold_of_position
+
+
+def _oof_combo_power(
+    columns: pd.DataFrame, target: np.ndarray, binary: bool, k: int
+) -> float | None:
+    """Out-of-fold power of a least-squares combination of `columns`, on the
+    same 0-1 scale `_power` reports for a single column.
+
+    Each fold's rows are scored from a fit that never saw them: `beta` comes
+    from `np.linalg.lstsq` on the other folds, and the held-out fold's score
+    is `[1, columns] @ beta`. Returns None if any fold is too small to fit, or
+    the pooled out-of-fold scores carry no computable power.
+    """
+    n = len(columns)
+    folds = _fold_ids(columns, k)
+    design = np.column_stack([np.ones(n), columns.to_numpy(dtype=float)])
+    oof = np.full(n, np.nan)
+
+    for fold in range(k):
+        test = folds == fold
+        train = ~test
+        if train.sum() < design.shape[1] + _MIN_ROWS_PER_FOLD or test.sum() == 0:
+            return None
+        beta, *_ = np.linalg.lstsq(design[train], target[train], rcond=None)
+        oof[test] = design[test] @ beta
+
+    if np.isnan(oof).any():
+        return None
+    if binary:
+        auc = rank_auc(target, oof)
+        return None if np.isnan(auc) else abs(2 * auc - 1)
+    return abs(pearson_r(oof, target))
+
+
+class CombinedFeatureLeakageCheck(BaseCheck):
+    """Does a small *combination* of columns do what the whole model does?
+
+    `LeakageCheck` asks this question for one column at a time, which misses
+    a leak split across several unremarkable-looking columns — the shape
+    this check targets. The motivating case: DataCo Supply Chain's own
+    `Late_delivery_risk` label is defined by comparing two shipping-day
+    columns against each other. Scored individually, each reaches barely
+    half of `LeakageCheck`'s default threshold (power 0.40 apiece); their
+    difference alone reaches 0.94 and a sign rule built from it scores 97.5%
+    accuracy, because that comparison is how the label was derived upstream
+    of the dataset. `LeakageCheck` reports `OK` on that validation set;
+    this check reports both columns together as the leak, by name.
+
+    For every candidate pair (and, if configured, triple) of numeric
+    features, a plain least-squares combination of them is fit and scored
+    **out-of-fold** — never in-sample, so a flag reflects reusable signal
+    rather than the fit's own freedom to find *some* line through the data —
+    on the same 0-1 power scale `LeakageCheck` already reports, so the two
+    checks' numbers are directly comparable.
+
+    The candidate pool deliberately excludes any column `LeakageCheck` would
+    already flag alone: a pair built from one already-flagged column is not
+    an independent finding, and this check's job is to surface only what a
+    single-column test could not have told you. Past
+    `ValidationConfig.combined_leakage_max_features` candidate columns, only
+    the ones with the highest individual power are combined — the same
+    trade-off `ProxyCorrelationCheck` makes for its own comparison grid.
+    """
+
+    name = "combined_feature_leakage"
+    category = "validation"
+    blocking = True
+    supported_tasks = ALL_TASKS
+
+    def __init__(self, config: ValidationConfig | None = None):
+        self.config = config or ValidationConfig()
+
+    def run(self, context) -> list[CheckResult]:
+        cfg = self.config
+        if context.y_true is None or context.y_pred is None:
+            return _not_applicable(
+                self,
+                "no y_true/y_pred — combined-feature leakage is measured by comparing "
+                "a fitted combination of features against the model's own power",
+            )
+
+        task = resolve_task(context)
+        binary = task != REGRESSION
+        if binary:
+            reduced = _binary_target(context, task)
+            if reduced is None:
+                return _not_applicable(
+                    self,
+                    "multiclass combined-feature leakage needs context.class_order or "
+                    "context.favourable_classes, so the target can be reduced to the "
+                    "one outcome a combination might be leaking",
+                )
+            target = reduced
+        else:
+            target = np.asarray(context.y_true, dtype=float)
+
+        scores = _model_score(context, task)
+        if scores is None:
+            return _not_applicable(
+                self,
+                "could not reduce y_pred to a single score to compare combinations "
+                "against — for multiclass, set context.class_order",
+            )
+        model_power = _power(pd.Series(scores, index=context.X.index), target, binary)
+        if model_power is None or model_power <= 0:
+            return _not_applicable(
+                self,
+                "the model's predictions carry no signal against y_true, so there is "
+                "nothing for a combination to be suspiciously close to",
+            )
+
+        numeric_cols = [c for c in context.X.columns if context.X[c].dtype.kind in "if"]
+        if len(numeric_cols) < 2:
+            return _not_applicable(
+                self, "fewer than two numeric feature columns — nothing to combine"
+            )
+
+        usable = context.X[numeric_cols].notna().all(axis=1) & pd.notna(pd.Series(target))
+        min_rows = max(_MIN_ROWS, cfg.combined_leakage_cv_folds * (2 + _MIN_ROWS_PER_FOLD))
+        if int(usable.sum()) < min_rows:
+            return _not_applicable(
+                self,
+                f"fewer than {min_rows} fully-populated numeric rows (need enough per "
+                f"fold for a {cfg.combined_leakage_cv_folds}-fold out-of-fold fit to "
+                "mean anything)",
+            )
+
+        Xu = context.X.loc[usable, numeric_cols].reset_index(drop=True)
+        yu = np.asarray(target)[usable.to_numpy()]
+
+        individual_power = {
+            c: _power(Xu[c], yu, binary) for c in numeric_cols
+        }
+        candidates = numeric_cols
+        if cfg.combined_leakage_skip_covered_features:
+            candidates = [
+                c for c in candidates if not _already_covered(individual_power[c], model_power, cfg)
+            ]
+        if len(candidates) < 2:
+            return _not_applicable(
+                self,
+                "fewer than two candidate columns remain once columns LeakageCheck "
+                "would already flag alone are set aside — nothing novel left to combine",
+            )
+
+        if len(candidates) > cfg.combined_leakage_max_features:
+            ranked = sorted(candidates, key=lambda c: -(individual_power[c] or 0.0))
+            logger.warning(
+                "%s: %d candidate column(s) exceeds combined_leakage_max_features=%d — "
+                "scoring only the %d with the highest individual power.",
+                self.name,
+                len(candidates),
+                cfg.combined_leakage_max_features,
+                cfg.combined_leakage_max_features,
+            )
+            candidates = ranked[: cfg.combined_leakage_max_features]
+
+        suspects: list[tuple[tuple[str, ...], float]] = []
+        n_tested = 0
+        for size in cfg.combined_leakage_combo_sizes:
+            if size < 2 or size > len(candidates):
+                continue
+            for combo in combinations(candidates, size):
+                n_tested += 1
+                power = _oof_combo_power(
+                    Xu[list(combo)], yu, binary, cfg.combined_leakage_cv_folds
+                )
+                if power is None:
+                    continue
+                if power >= cfg.leakage_min_power and power >= cfg.leakage_ratio * model_power:
+                    suspects.append((combo, power))
+
+        if not suspects:
+            return [
+                CheckResult(
+                    self.name,
+                    self.category,
+                    "OK",
+                    f"no combination of up to {max(cfg.combined_leakage_combo_sizes)} "
+                    f"feature(s) approaches the model's own predictive power "
+                    f"({model_power:.3f}) across {n_tested} combination(s) tested over "
+                    f"{len(candidates)} candidate column(s)",
+                    self.blocking,
+                    metadata={
+                        "model_power": round(model_power, 4),
+                        "threshold_ratio": cfg.leakage_ratio,
+                        "min_power": cfg.leakage_min_power,
+                        "n_candidates_scored": len(candidates),
+                        "n_combinations_tested": n_tested,
+                    },
+                )
+            ]
+
+        suspects.sort(key=lambda pair: (len(pair[0]), -pair[1]))
+        reported: list[tuple[tuple[str, ...], float]] = []
+        for combo, power in suspects:
+            if any(set(seen) <= set(combo) for seen, _ in reported):
+                continue
+            reported.append((combo, power))
+
+        return [
+            CheckResult(
+                self.name,
+                self.category,
+                "COMBINED_LEAKAGE_RISK",
+                detail=(
+                    f"{' + '.join(combo)} together reach {power:.3f} of the target "
+                    f"out-of-fold ({power / model_power:.0%} of the whole model's "
+                    f"{model_power:.3f}), while no single one of them alone reaches "
+                    f"{cfg.leakage_min_power:.2f} — check whether they are different "
+                    "views of the same post-outcome fact (e.g. an actual value and the "
+                    "plan or schedule it is compared against to define the label)"
+                ),
+                blocking=self.blocking,
+                metadata={
+                    "features": list(combo),
+                    "combo_power": round(power, 4),
+                    "model_power": round(model_power, 4),
+                    "power_ratio": round(power / model_power, 4),
+                    "individual_power": {
+                        c: (
+                            round(individual_power[c], 4)
+                            if individual_power[c] is not None
+                            else None
+                        )
+                        for c in combo
+                    },
+                    "threshold_ratio": cfg.leakage_ratio,
+                    "min_power": cfg.leakage_min_power,
+                    "cv_folds": cfg.combined_leakage_cv_folds,
+                    "n_candidates_scored": len(candidates),
+                    "n_combinations_tested": n_tested,
+                },
+            )
+            for combo, power in reported
         ]
 
 
@@ -708,6 +977,7 @@ class FeatureDriftCheck(BaseCheck):
 
 
 __all__ = [
+    "CombinedFeatureLeakageCheck",
     "FeatureContractCheck",
     "FeatureDriftCheck",
     "LeakageCheck",

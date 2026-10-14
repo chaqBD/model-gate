@@ -6,6 +6,44 @@ All notable changes to this project are documented here. Format follows
 
 ## [Unreleased]
 
+A leak split across two columns, neither of which looks like one.
+
+`LeakageCheck` asks whether a single column's solo predictive power rivals
+the model's own. It cannot see a leak built from a *combination* of columns,
+each individually unremarkable — and that gap is not hypothetical. The
+public DataCo Supply Chain dataset's own `Late_delivery_risk` label is
+defined by comparing two of its own columns, the scheduled and the realised
+shipping time. Scored individually, each reaches power 0.40 — half of
+`LeakageCheck`'s 0.80 floor. Their difference alone reaches 0.94, and a sign
+rule built from it scores 97.5% accuracy on the full ~180k-row dataset,
+because that comparison is how the label was derived. A model trained on
+both columns benchmarks at 0.974 ROC AUC; the same model without the
+realised-time column benchmarks at 0.731 — a 0.243 gap that is arithmetic,
+not model skill. Full case study and numbers:
+[chaqBD/bdp-gate-DataCo](https://github.com/chaqBD/bdp-gate-DataCo).
+
+### Added
+- **`CombinedFeatureLeakageCheck`** — generalises `LeakageCheck` from single
+  columns to small combinations of them (pairs by default, triples
+  configurable). A plain least-squares combination of each candidate subset
+  is fit and scored **out-of-fold**, never in-sample, so a flag reflects
+  reusable signal rather than a fit's freedom to find *some* line through the
+  data. Fold assignment is deterministic — derived from row content via
+  `bdp_model_gate.uncertainty.canonical_order`, the same ordering the
+  bootstrap already resamples over — so permuting the validation frame
+  cannot move a row into a different fold or change a verdict. Columns
+  `LeakageCheck` would already flag alone are dropped from the candidate
+  pool by default (`combined_leakage_skip_covered_features`), so every
+  finding from this check is something that check could not have told you.
+- Four new `ValidationConfig` fields: `combined_leakage_combo_sizes`,
+  `combined_leakage_cv_folds`, `combined_leakage_max_features`,
+  `combined_leakage_skip_covered_features`. `leakage_ratio` and
+  `leakage_min_power` are reused as this check's threshold too — the
+  underlying question is identical, only what is being measured differs.
+
+### Changed
+- The default suite is 27 checks across five categories, up from 26.
+
 ## [0.7.0] - 2026-10-15
 
 Champion against challenger — and making the mutation score mean what it says.

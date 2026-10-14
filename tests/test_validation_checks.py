@@ -20,6 +20,7 @@ from bdp_model_gate import ModelGate, StructuredGateContext
 from bdp_model_gate.config import ComplianceConfig, ValidationConfig
 from bdp_model_gate.stats import average_ranks, pearson_r, rank_auc
 from bdp_model_gate.structured.validation_checks import (
+    CombinedFeatureLeakageCheck,
     FeatureContractCheck,
     FeatureDriftCheck,
     LeakageCheck,
@@ -195,6 +196,94 @@ def test_leakage_reports_features_worst_first():
     powers = [r.metadata["feature_power"] for r in results]
     assert powers == sorted(powers, reverse=True)
     assert results[0].metadata["feature"] == "leak_exact"
+
+
+# --------------------------------------------------------------------------
+# CombinedFeatureLeakageCheck — the leak LeakageCheck cannot see
+# --------------------------------------------------------------------------
+
+
+def _shipping_style_frame(n=2000, seed=7):
+    """Shaped like the real case that motivated this check: DataCo Supply
+    Chain's `Late_delivery_risk` is defined by comparing two shipping-day
+    columns, each of which scores only ~0.40 power alone, while their
+    difference reconstructs the label almost exactly."""
+    rng = np.random.default_rng(seed)
+    scheduled = rng.integers(1, 30, n).astype(float)
+    offset = rng.choice([-1.0, 1.0], n) * rng.integers(1, 3, n).astype(float)
+    real = scheduled + offset
+    late = (offset > 0).astype(int)
+    X = pd.DataFrame({"scheduled": scheduled, "real": real})
+    return X, late
+
+
+def test_combo_is_flagged_when_no_single_feature_is():
+    X, y = _shipping_style_frame()
+    y_pred = y.astype(float)
+
+    single = LeakageCheck().run(_context(X, y, y_pred))
+    assert [r.flag for r in single] == ["OK"]
+
+    (result,) = CombinedFeatureLeakageCheck().run(_context(X, y, y_pred))
+    assert result.flag == "COMBINED_LEAKAGE_RISK"
+    assert set(result.metadata["features"]) == {"scheduled", "real"}
+    assert result.metadata["combo_power"] > 0.9
+
+
+def test_independent_noise_columns_are_not_flagged():
+    rng = np.random.default_rng(3)
+    n = 1000
+    X = pd.DataFrame(
+        {
+            "noise_a": rng.normal(size=n),
+            "noise_b": rng.normal(size=n),
+            "noise_c": rng.normal(size=n),
+        }
+    )
+    y = rng.integers(0, 2, n)
+    y_pred = rng.random(n)
+    results = CombinedFeatureLeakageCheck().run(_context(X, y, y_pred))
+    assert [r.flag for r in results] == ["OK"]
+
+
+def test_a_column_already_covered_by_leakage_check_is_excluded():
+    """A pair built from an already-flagged column is not an independent
+    finding — the candidate pool is restricted to what LeakageCheck passes."""
+    rng = np.random.default_rng(1)
+    n = 500
+    y = rng.integers(0, 2, n)
+    X = pd.DataFrame(
+        {
+            "leak_exact": y.astype(float) * 1000.0 + rng.normal(scale=0.01, size=n),
+            "noise": rng.normal(size=n),
+        }
+    )
+    y_pred = y.astype(float)
+    (result,) = CombinedFeatureLeakageCheck().run(_context(X, y, y_pred))
+    assert result.flag == "NOT_APPLICABLE"
+
+
+def test_combo_leakage_in_a_regression_target():
+    rng = np.random.default_rng(42)
+    n = 1000
+    a = rng.normal(size=n)
+    b = rng.normal(size=n)
+    target = a - b
+    X = pd.DataFrame({"a": a, "b": b})
+    y_pred = target.copy()
+
+    single = LeakageCheck().run(_context(X, target, y_pred, task="regression"))
+    assert [r.flag for r in single] == ["OK"]
+
+    combined = CombinedFeatureLeakageCheck().run(_context(X, target, y_pred, task="regression"))
+    assert any(r.flag == "COMBINED_LEAKAGE_RISK" for r in combined)
+
+
+def test_combined_leakage_is_not_applicable_below_min_rows():
+    X = pd.DataFrame({"a": [1.0, 2.0, 3.0], "b": [3.0, 2.0, 1.0]})
+    y = np.array([0, 1, 0])
+    (result,) = CombinedFeatureLeakageCheck().run(_context(X, y, y.astype(float)))
+    assert result.flag == "NOT_APPLICABLE"
 
 
 # --------------------------------------------------------------------------
@@ -477,6 +566,7 @@ def test_validation_findings_block_and_lead_the_report():
     validation = report.by_category("validation")
     assert {r.check_name for r in validation} == {
         "target_leakage",
+        "combined_feature_leakage",
         "split_overlap",
         "validation_strategy",
         "feature_contract",

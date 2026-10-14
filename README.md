@@ -92,6 +92,10 @@ report = run_structured_gate(model, X_val, y_val, y_pred, protected_df=protected
 **Validation** (blocking — and reported first)
 - `LeakageCheck` — a feature whose solo predictive power rivals the whole
   model's, the signature of a leaked target
+- `CombinedFeatureLeakageCheck` — a *combination* of features that rivals the
+  whole model's power even though none of them does alone, scored
+  out-of-fold — e.g. an actual value and the plan/schedule it is compared
+  against to define the label
 - `SplitOverlapCheck` — rows the model has already seen, plus duplicates
   within the validation set
 - `ValidationStrategyCheck` — was the holdout separated in time, or at
