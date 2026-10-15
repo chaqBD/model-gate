@@ -505,17 +505,9 @@ Recorded rather than silently corrected, so the reasons survive:
   `feature_names_in_` otherwise has no way to say which columns are its own.
 
 Found while building, and **not fixed on this branch** because each changes
-existing verdicts and deserves its own entry:
-
-- `PerformanceThresholdCheck` binds an exposure weight vector to the full
-  frame, so on every bootstrap resample the weights land on the wrong rows. An
-  exposure-weighted RMSE of 5.36 reported an interval of [131.8, 180.7]. The
-  comparison passes weights per resample and is unaffected.
-- `to_class_labels` reads a probability matrix's columns in `class_order`,
-  while scikit-learn's `predict_proba` orders them alphabetically and
-  `calibration_checks` assumes the alphabetical order. With
-  `class_order=["decline", "refer", "accept"]` a 99%-accurate model scores
-  0.3%.
+existing verdicts and deserves its own release — see
+[0.7.1](#071--exposure-weights-that-follow-their-rows) and
+[0.7.2](#072--probability-columns-in-the-order-the-model-wrote-them).
 
 ### Checklist
 
@@ -531,6 +523,148 @@ existing verdicts and deserves its own entry:
 - [x] CLI flags (`--baseline-col` deliberately left alone — see above)
 - [x] Notebook 09, docs page, landing page, CHANGELOG
 - [ ] Version bump to 0.7.0 and the site's version stamps, at release
+
+## 0.7.1 — Exposure weights that follow their rows
+
+**Branch:** `fix/exposure-weighted-intervals`
+
+A bug in 0.6.0, found while building 0.7.0. **It changes intervals, and so
+can change verdicts, on every exposure-weighted performance score.**
+
+### What is wrong
+
+`resolve_metric` binds `context.exposure` into the metric as
+`functools.partial(fn, sample_weight=exposure)` — the full vector, in the
+frame's original row order. `PerformanceThresholdCheck` then bootstraps that
+metric by calling it on resampled rows: `metric.fn(y_true[rows], y_pred[rows])`.
+The predictions move with the resample; the weights do not. Every draw pairs
+row *i*'s error with some other row's exposure.
+
+The point estimate is computed on all rows in order, so it is right. Only the
+interval is wrong — which since 0.6.0 is what decides the verdict.
+
+Measured:
+
+| | point | interval reported |
+|---|---|---|
+| exposure-weighted RMSE, constructed case | 5.36 | **[131.8, 180.7]** — does not contain its own point |
+| notebook 07's Lorenz Gini, as published | 0.5637 | [0.484, 0.595] |
+| the same Gini, weights following their rows | 0.5637 | [0.522, 0.602] |
+
+Notebook 07's verdict survives — both intervals clear the 0.25 floor — but the
+published number is wrong, and a floor nearer 0.5 would have read `UNCERTAIN`
+where the data says `OK`.
+
+**Affected:** `performance_thresholds` whenever `context.exposure` is set and
+the metric takes a weight — `rmse`, `mae`, `mape`, `poisson_deviance`, `r2`,
+`lorenz_gini`. The regression fairness and actuarial checks index their
+weights per resample and are not affected; neither is the 0.7.0 comparison,
+which was written to pass weights per call.
+
+### The fix
+
+**Never bind a per-row array into a callable that will be resampled.**
+`resolve_metric` returns the unweighted function plus a `weighted` flag, and
+the caller passes `sample_weight=exposure[rows]` on each call — the shape
+`ComparisonMetric.score` already has. One mechanism, shared by both, so the two
+cannot drift.
+
+### Guards, so this class of bug stays dead
+
+- **Constant exposure is no exposure.** With every row weighted 1.0, every
+  exposure-reading check must give exactly the interval it gives without
+  exposure. This is the test that would have caught it, and it applies to all
+  of them, not just the one that was broken.
+- **Units do not matter.** Exposure × 12 (months instead of years) must not
+  move a point or an interval — the invariant 0.7.0's comparison tests
+  already assert, extended to the performance check.
+- **A weighted interval contains its point** on a well-behaved case, asserted
+  for each weight-taking metric.
+- An audit of every `bootstrap` statistic for closures over un-indexed per-row
+  arrays, with the result written down rather than assumed.
+
+### The rest of the slice
+
+- Re-execute 03 and 07; 07's Gini interval changes, as above.
+- CHANGELOG under **⚠️ This release changes verdicts**, naming the metrics and
+  the condition (`exposure` supplied), so a pinned pipeline knows whether it
+  is affected.
+- `web/docs/concepts.md#how-sure-is-it` gains a sentence on weights.
+
+## 0.7.2 — Probability columns in the order the model wrote them
+
+**Branch:** `fix/probability-column-order`
+
+A bug in 0.6.0 and earlier, found while building 0.7.0. **It changes scores and
+verdicts for multiclass models gated on a probability matrix with a
+non-alphabetical `class_order`** — which is the ordinal case, the one
+`class_order` exists for.
+
+### What is wrong
+
+The library holds two conventions for which class a probability-matrix column
+belongs to, and uses both:
+
+| Reads columns in | Used by |
+|---|---|
+| `class_order` | `to_class_labels` → `performance_thresholds` (score and the ordinal confusion chart), `disparate_impact` and `equalised_odds` for multiclass, and the 0.7.0 comparison checks on a matrix |
+| sorted order (`sorted(class_order, key=str)`) | `calibration_checks`, `shap_subgroup_gap`, `counterfactual_flip`, the leakage check's model score |
+
+scikit-learn's `predict_proba` — and LightGBM's and XGBoost's sklearn APIs —
+emits columns in `model.classes_` order, which is sorted. So the second group
+is right for every common model and the first is wrong whenever `class_order`
+is not alphabetical. Measured: a `LogisticRegression` that is **99% accurate**
+by its labels scores **0.3%** from its own `predict_proba` matrix with
+`class_order=["decline", "refer", "accept"]`, because "accept" (column 0) is
+read as "decline".
+
+Nothing reports an error. It is a confident, wrong number — the failure this
+project exists to prevent.
+
+### The decision
+
+**`class_order` says which outcome is better. It does not say how a matrix is
+laid out**, and using one field for both is the root cause. A matrix's
+columns are the model's classes, resolved once:
+
+1. `model.classes_`, when the model has one — the authority for the matrix it
+   produced;
+2. otherwise sorted order, the convention every scikit-learn-shaped model
+   follows;
+3. a new, optional `StructuredGateContext.proba_classes` to state it
+   explicitly, for a `predict_proba_fn` or an endpoint with its own layout.
+
+One helper owns that resolution and every call site above uses it, so there is
+one convention in the codebase rather than two. When `model.classes_` and
+`class_order` name different sets of classes, validation fails before any check
+runs rather than mapping one onto the other.
+
+For a `Champion`, the same rule applies to the champion's own model — its
+`classes_` may differ from the challenger's, which `comparison_integrity`
+already reports.
+
+### Guards
+
+- **The matrix and the labels agree.** For every multiclass family in the
+  model matrix, scoring `predict_proba(X)` and scoring `predict(X)` with a
+  label metric must give the same answer — with a deliberately
+  non-alphabetical `class_order`. This is the test that would have caught it,
+  and it belongs in `test_model_matrix.py` so a new family inherits it.
+- **Column relabelling.** Permuting a matrix's columns together with
+  `proba_classes` must not move any number.
+- **One convention.** A test that fails if anything other than the helper
+  indexes a probability matrix by class.
+
+### The rest of the slice
+
+- Re-execute 02 and 06 (multiclass, labels today, so expected unchanged — say
+  so once checked), and add a matrix-scored cell to 02 that would have shown
+  the bug.
+- CHANGELOG under **⚠️ This release changes verdicts**: affected when
+  `y_pred` is a probability matrix *and* `class_order` is not in sorted order.
+  Label predictions, binary models and regression are untouched.
+- `web/docs/tasks/multiclass.md` states the column contract and
+  `proba_classes`.
 
 ## 0.8.0 — Release automation, in two stages
 
