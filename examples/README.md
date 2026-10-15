@@ -88,8 +88,7 @@ committed with stale outputs is worse than no notebook, because the outputs
 look authoritative.
 
 The committed outputs were produced on Python 3.13. Notebook 09 was executed
-against the unreleased 0.7.0 tree with scikit-learn 1.9, which still reports
-its version as 0.6.0 until the release bump. Notebooks 06, 07 and 08
+against `bdp-model-gate` 0.7.0 with scikit-learn 1.9. Notebooks 06, 07 and 08
 were last executed against `bdp-model-gate` 0.6.0; notebook 03 against 0.5.2; notebook 01 against 0.5.1
 with scikit-learn 1.9, matplotlib 3.11 and seaborn 0.13; notebooks 02, 04 and
 05 against 0.4.1 with scikit-learn 1.7, shap 0.49, torch 2.13 and xgboost 3.4. The split is honest
