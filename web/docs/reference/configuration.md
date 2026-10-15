@@ -124,8 +124,8 @@ the config there as well as to the checks:
     probability alike.
 
     `shap_gap_threshold = 0.50` means "flag a feature whose cross-group gap is
-    worth half a typical contribution". Before 0.4.2 it was absolute and in
-    target units, which flagged nearly every feature on a money target.
+    worth half a typical contribution". An absolute threshold in target units
+    would flag nearly every feature on a money target.
 
 ## Compliance
 
@@ -143,7 +143,7 @@ config.compliance.required_model_card_fields = ["lawful_basis", "retention_perio
 
 ## Uncertainty
 
-New in 0.6.0. Twelve checks bootstrap their statistic, and where the interval
+Twelve checks bootstrap their statistic, and where the interval
 sits relative to the threshold decides the verdict — see
 [How sure is it?](../concepts.md#how-sure-is-it) for why, and for the
 measurement that motivated it.
@@ -163,7 +163,7 @@ so it is worth being explicit about what each value means:
 ```python
 config.uncertainty.on_uncertain = "review"  # a straddling interval -> UNCERTAIN, non-blocking
 config.uncertainty.on_uncertain = "block"  # if it might breach, stop
-config.uncertainty.on_uncertain = "point"  # decide as before 0.6.0
+config.uncertainty.on_uncertain = "point"  # decide on the point estimate alone
 config.uncertainty.compute_intervals = False  # do not spend the time at all
 ```
 
@@ -302,6 +302,6 @@ scikit-learn was installed and accuracy when it was not, with nothing in the
 report saying which.
 
 `jailbreak_prompts` described the old design. Three canned prompts *were* the
-whole injection check until 0.5.4; they are now the smallest part of a
+whole injection check in earlier versions; they are now the smallest part of a
 categorised corpus, and the interesting knobs are which families to fire and
 how deep rather than which three strings to send.

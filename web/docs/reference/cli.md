@@ -111,8 +111,8 @@ bdp-model-gate \
   --config pricing_gate.yaml
 ```
 
-The injection check was Python-only until 0.5.4 — there is no way to put a
-callable on a command line. The three flags above follow `--model-loader`:
+There is no way to put a callable on a command line, so the three flags above
+follow `--model-loader`:
 **your factory does the SDK import and the credential handling**, so neither is
 a dependency of a governance gate.
 

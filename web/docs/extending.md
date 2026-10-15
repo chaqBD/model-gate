@@ -74,7 +74,7 @@ human review. Ask whether a false positive on your check should stop a
 deployment at 2am. If not, it is non-blocking.
 
 **`supported_tasks`** declares what your check can answer. It defaults to
-every task, so a check written before 0.3.0 keeps working — but if yours only
+every task, so a check that never declares it keeps working — but if yours only
 makes sense for one, say so and the gate will report `NOT_APPLICABLE`
 elsewhere rather than letting it produce a meaningless number.
 

@@ -131,14 +131,13 @@ relative to its own magnitude, so a sum-insured column in the millions does
 not swamp a single-digit risk score.
 
 !!! note "`shap_gap_threshold` needs no rescaling"
-    Since 0.4.2 it is relative to the mean absolute SHAP contribution, so the
+    It is relative to the mean absolute SHAP contribution, so the
     same default works whether contributions are probabilities or naira. On a
     premium model the planted geographic proxy scores around 1.4 while genuine
     noise sits below 0.03, against a default of `0.50`.
 
-    Before 0.4.2 it was absolute and in target units, which flagged nearly
-    every feature on a money target. If you pinned a hand-scaled value, remove
-    it.
+    If you pinned a hand-scaled value before 0.4.2, when the threshold was
+    absolute and in target units, remove it.
 
 Worked end to end in
 [notebook 03](../examples/03_regression_sklearn.ipynb).

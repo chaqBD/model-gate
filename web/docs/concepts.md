@@ -111,19 +111,19 @@ reviewer instead.
 
 ## How sure is it?
 
-Until 0.6.0 every check in this library compared a **point estimate to a fixed
-threshold with no notion of sampling error**. `FairnessConfig.min_group_size =
-30` was the only nod to it, and it is not nearly enough: for a proportion near
-0.5, n=30 carries a standard error of 0.09, so the *difference* of two such
-proportions carries one near 0.13. Against a `disparity_threshold` of 0.10,
-the verdict was noise.
+Comparing a **point estimate to a fixed threshold, with no notion of sampling
+error**, is not enough. `FairnessConfig.min_group_size = 30` is a crude guard
+and nowhere near sufficient: for a proportion near 0.5, n=30 carries a standard
+error of 0.09, so the *difference* of two such proportions carries one near
+0.13. Against a `disparity_threshold` of 0.10, a point-estimate verdict is
+noise.
 
 That is measurable, and it was measured. Halve the same validation set at
 random and gate both halves:
 
 | | Halvings that disagreed |
 |---|---|
-| point estimate (pre-0.6.0) | **5 of 10** |
+| point estimate alone | **5 of 10** |
 | with intervals | **1 of 10** |
 
 A gate that flips on resampling teaches people to re-run it until it passes,
@@ -156,8 +156,8 @@ A gate nobody can overrule gets switched off, so
 
 - **`"review"`** (default) — route it to a human.
 - **`"block"`** — the precautionary posture. If it *might* breach, stop.
-- **`"point"`** — decide on the point estimate, exactly as releases before
-  0.6.0 did.
+- **`"point"`** — decide on the point estimate alone, as if no interval had
+  been computed.
 
 `"point"` deliberately does not *hide* the interval: it still appears in the
 detail string and the metadata, so the governance pack carries it and the
