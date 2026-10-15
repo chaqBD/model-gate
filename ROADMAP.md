@@ -25,7 +25,7 @@ Every entry below ships as a complete slice, not just code:
 A release is not done when the code works. It is done when someone who has
 never seen it can find it, read why it exists, and run it.
 
-Current release: **0.6.0**. Next: **0.6.1**.
+Current release: **0.6.0**. Next: **0.7.0**.
 
 > **This file tracks what should happen.** What already happened lives in
 > [`CHANGELOG.md`](CHANGELOG.md), and shipped entries are removed from here
@@ -192,127 +192,6 @@ Do not set `--min-kill-rate` until a few weekly runs have established where the
 number actually sits.
 
 ---
-
-## 0.6.1 — Release automation, in two stages
-
-**Branch:** `feat/release-automation`
-
-Publishing is manual. Two of the silent failures this project has shipped were
-caught *only* by installing the published artifact, and v0.3.0 and v0.3.1 were
-both tagged on commits with a red Python 3.9 job. Fitting, for a tool that
-exists to gate deploys.
-
-### The shape: publish a candidate, then promote it
-
-Two workflows, two triggers, one artifact.
-
-```
-STAGE 1 — candidate            trigger: tag v* pushed
-  guard        tag == pyproject version, and CI was green for this exact SHA
-  build        sdist + wheel; suite run against the INSTALLED wheel
-               -> SHA256SUMS recorded, dists uploaded as a run artifact
-  testpypi     environment: testpypi, no approval          -> TestPyPI
-  smoke        fresh venv, install FROM TestPyPI, run a real gate
-
-        ... a human tests the candidate, for as long as that takes ...
-
-STAGE 2 — promotion            trigger: GitHub Release published
-  fetch        download stage 1's dists for this tag; RE-VERIFY SHA256
-  pypi         environment: pypi, REQUIRED REVIEWER        -> PyPI
-```
-
-### Why two workflows rather than one with an approval gate
-
-The obvious design is a single workflow whose last job waits on a required
-reviewer. Three reasons not to.
-
-**1. Least privilege by construction, not by approval.** Trusted Publishing
-binds a publisher to a specific *workflow filename* plus environment. Register
-PyPI's publisher against `release-promote.yml` **only**, and a tag push becomes
-structurally incapable of reaching PyPI: no credential for it exists in that
-workflow. In the single-workflow design the capability is present on every tag
-push and held back by a person clicking the right button.
-
-For a library whose entire purpose is stopping the wrong thing reaching
-production, "it cannot" beats "someone must not".
-
-**2. Promotion is a decision, and decisions need a record.** Publishing the
-GitHub Release is the human act, and the release notes plus the environment
-approval are the audit trail. A pending deployment inside a workflow run is
-not a record anyone reads a year later.
-
-**3. Testing a candidate takes days, and a pending run does not.** GitHub
-expires pending deployments, and a run parked waiting for approval is awkward
-to re-trigger. Decoupling means the candidate can sit on TestPyPI as long as it
-needs to.
-
-### The property separation puts at risk, and how stage 2 keeps it
-
-> **PyPI must receive the exact bytes that TestPyPI was tested with.**
-
-So **stage 2 must never rebuild.** Builds are not reproducible across runner
-images and setuptools versions, and a rebuild would publish an artifact nobody
-smoke-tested — which is precisely the failure mode this pipeline exists to
-prevent, reintroduced by the pipeline itself.
-
-Stage 1 records `SHA256SUMS` beside the dists. Stage 2 downloads that run's
-artifact, re-verifies every digest, and **fails if the artifact is missing or a
-digest differs**. No fallback to building; a missing candidate means re-running
-stage 1, not improvising.
-
-### One decision to take before writing any of it
-
-**Does the candidate burn the real version number on TestPyPI?**
-
-Version collisions are permanent on *both* indexes. Publish `0.6.0` to
-TestPyPI, find a bug, and `0.6.0` can never be published to TestPyPI again.
-
-The tempting escape is to publish `0.6.0.devN` to TestPyPI and `0.6.0` to PyPI
-— but then the two artifacts are **not the same bytes**, and the property above
-is gone. You cannot have both identical artifacts and a re-testable version
-number.
-
-**Take identical artifacts.** A failed candidate means bumping the patch
-version and tagging again, which costs a version number and nothing else. Say
-so in `CONTRIBUTING.md` so it is not rediscovered mid-release.
-
-### Guards
-
-- **Tag/version consistency** — fail if the tag does not match
-  `pyproject.toml`. Cheap, and the whole release hangs off it.
-- **Publish only on a green matrix for that commit** — query the CI conclusion
-  for the tagged SHA rather than trusting that a tag implies a tested commit.
-  This is the guard that v0.3.0 and v0.3.1 did not have.
-- **Test the installed artifact, not the source tree.** The Python 3.9 import
-  failure lived in the *published wheel*, and the shap/numpy clash only
-  appeared on a clean install. Running the suite against the repo would have
-  missed both.
-- **`skip-existing: true` on TestPyPI, `false` on PyPI.** Re-running a
-  candidate is normal; a duplicate on PyPI is a mistake and should fail loudly.
-- **`--extra-index-url https://pypi.org/simple/` on the smoke test.** TestPyPI
-  does not carry numpy or pandas, so `pip install --index-url` alone cannot
-  resolve this package's dependencies. This trap has cost other projects an
-  afternoon; it costs us one line.
-- **Assert `__version__` from the installed wheel** in the smoke test, then run
-  a real gate end to end and check the verdict — not just that the import
-  succeeded.
-
-### Manual prerequisites (repo admin, not code)
-
-- [ ] Register **TestPyPI** trusted publisher: repo, `release-candidate.yml`,
-      environment `testpypi`
-- [ ] Register **PyPI** trusted publisher: repo, `release-promote.yml`,
-      environment `pypi` — a *different* workflow filename, which is the point
-- [ ] Create the `testpypi` environment (no protection)
-- [ ] Create the `pypi` environment with a **required reviewer**
-- [ ] Do the branch and tag ruleset work in
-      [Before the next release](#before-the-next-release--the-repository-itself)
-      first; only an Environment stands between a tag and PyPI, and only a
-      ruleset stands between a bad commit and `main`
-
-Two things to know: if either workflow **filename** changes, publishing breaks
-until the trusted-publisher registration is updated; and **version collisions
-are permanent**, per the decision above.
 
 ## 0.7.0 — Champion vs challenger
 
@@ -605,6 +484,127 @@ because it roughly doubles the run time.
 - [ ] Provenance in `report.comparison`, JSON and HTML
 - [ ] CLI flags; `--baseline-col` aliased
 - [ ] Notebook 09, docs page, landing page, CHANGELOG
+
+## 0.8.0 — Release automation, in two stages
+
+**Branch:** `feat/release-automation`
+
+Publishing is manual. Two of the silent failures this project has shipped were
+caught *only* by installing the published artifact, and v0.3.0 and v0.3.1 were
+both tagged on commits with a red Python 3.9 job. Fitting, for a tool that
+exists to gate deploys.
+
+### The shape: publish a candidate, then promote it
+
+Two workflows, two triggers, one artifact.
+
+```
+STAGE 1 — candidate            trigger: tag v* pushed
+  guard        tag == pyproject version, and CI was green for this exact SHA
+  build        sdist + wheel; suite run against the INSTALLED wheel
+               -> SHA256SUMS recorded, dists uploaded as a run artifact
+  testpypi     environment: testpypi, no approval          -> TestPyPI
+  smoke        fresh venv, install FROM TestPyPI, run a real gate
+
+        ... a human tests the candidate, for as long as that takes ...
+
+STAGE 2 — promotion            trigger: GitHub Release published
+  fetch        download stage 1's dists for this tag; RE-VERIFY SHA256
+  pypi         environment: pypi, REQUIRED REVIEWER        -> PyPI
+```
+
+### Why two workflows rather than one with an approval gate
+
+The obvious design is a single workflow whose last job waits on a required
+reviewer. Three reasons not to.
+
+**1. Least privilege by construction, not by approval.** Trusted Publishing
+binds a publisher to a specific *workflow filename* plus environment. Register
+PyPI's publisher against `release-promote.yml` **only**, and a tag push becomes
+structurally incapable of reaching PyPI: no credential for it exists in that
+workflow. In the single-workflow design the capability is present on every tag
+push and held back by a person clicking the right button.
+
+For a library whose entire purpose is stopping the wrong thing reaching
+production, "it cannot" beats "someone must not".
+
+**2. Promotion is a decision, and decisions need a record.** Publishing the
+GitHub Release is the human act, and the release notes plus the environment
+approval are the audit trail. A pending deployment inside a workflow run is
+not a record anyone reads a year later.
+
+**3. Testing a candidate takes days, and a pending run does not.** GitHub
+expires pending deployments, and a run parked waiting for approval is awkward
+to re-trigger. Decoupling means the candidate can sit on TestPyPI as long as it
+needs to.
+
+### The property separation puts at risk, and how stage 2 keeps it
+
+> **PyPI must receive the exact bytes that TestPyPI was tested with.**
+
+So **stage 2 must never rebuild.** Builds are not reproducible across runner
+images and setuptools versions, and a rebuild would publish an artifact nobody
+smoke-tested — which is precisely the failure mode this pipeline exists to
+prevent, reintroduced by the pipeline itself.
+
+Stage 1 records `SHA256SUMS` beside the dists. Stage 2 downloads that run's
+artifact, re-verifies every digest, and **fails if the artifact is missing or a
+digest differs**. No fallback to building; a missing candidate means re-running
+stage 1, not improvising.
+
+### One decision to take before writing any of it
+
+**Does the candidate burn the real version number on TestPyPI?**
+
+Version collisions are permanent on *both* indexes. Publish `0.6.0` to
+TestPyPI, find a bug, and `0.6.0` can never be published to TestPyPI again.
+
+The tempting escape is to publish `0.6.0.devN` to TestPyPI and `0.6.0` to PyPI
+— but then the two artifacts are **not the same bytes**, and the property above
+is gone. You cannot have both identical artifacts and a re-testable version
+number.
+
+**Take identical artifacts.** A failed candidate means bumping the patch
+version and tagging again, which costs a version number and nothing else. Say
+so in `CONTRIBUTING.md` so it is not rediscovered mid-release.
+
+### Guards
+
+- **Tag/version consistency** — fail if the tag does not match
+  `pyproject.toml`. Cheap, and the whole release hangs off it.
+- **Publish only on a green matrix for that commit** — query the CI conclusion
+  for the tagged SHA rather than trusting that a tag implies a tested commit.
+  This is the guard that v0.3.0 and v0.3.1 did not have.
+- **Test the installed artifact, not the source tree.** The Python 3.9 import
+  failure lived in the *published wheel*, and the shap/numpy clash only
+  appeared on a clean install. Running the suite against the repo would have
+  missed both.
+- **`skip-existing: true` on TestPyPI, `false` on PyPI.** Re-running a
+  candidate is normal; a duplicate on PyPI is a mistake and should fail loudly.
+- **`--extra-index-url https://pypi.org/simple/` on the smoke test.** TestPyPI
+  does not carry numpy or pandas, so `pip install --index-url` alone cannot
+  resolve this package's dependencies. This trap has cost other projects an
+  afternoon; it costs us one line.
+- **Assert `__version__` from the installed wheel** in the smoke test, then run
+  a real gate end to end and check the verdict — not just that the import
+  succeeded.
+
+### Manual prerequisites (repo admin, not code)
+
+- [ ] Register **TestPyPI** trusted publisher: repo, `release-candidate.yml`,
+      environment `testpypi`
+- [ ] Register **PyPI** trusted publisher: repo, `release-promote.yml`,
+      environment `pypi` — a *different* workflow filename, which is the point
+- [ ] Create the `testpypi` environment (no protection)
+- [ ] Create the `pypi` environment with a **required reviewer**
+- [ ] Do the branch and tag ruleset work in
+      [Before the next release](#before-the-next-release--the-repository-itself)
+      first; only an Environment stands between a tag and PyPI, and only a
+      ruleset stands between a bad commit and `main`
+
+Two things to know: if either workflow **filename** changes, publishing breaks
+until the trusted-publisher registration is updated; and **version collisions
+are permanent**, per the decision above.
 
 ## Later
 

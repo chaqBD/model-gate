@@ -741,7 +741,8 @@ See [`ROADMAP.md`](ROADMAP.md) for the detail and the decisions behind each.
 
 | Release | Theme |
 |---|---|
-| **0.6.1** | Release automation — publish on tag via Trusted Publishing, PyPI behind a required reviewer. |
+| **0.7.0** | Champion vs challenger — compare a proposed model against the one in production, with blocking and non-blocking outcomes. |
+| **0.8.0** | Release automation — publish on tag via Trusted Publishing, PyPI behind a required reviewer. |
 | **1.0.0** | A public, subclassable `ModelAdapter`. |
 | Later | Unstructured data (text/image/audio). |
 

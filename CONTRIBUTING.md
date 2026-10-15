@@ -542,7 +542,7 @@ and ~80 in CI. Re-measure when you are hardening an area, not on every release,
 and re-label rather than overwrite.
 
 Label them with the *selection* too, when it changes. The 0.5.2 figures were
-measured against five test files and the 0.6.1 ones against the suite; they are
+measured against five test files and the 0.7.0 ones against the suite; they are
 both honest and not comparable, and only the label says so.
 
 ## Branches
