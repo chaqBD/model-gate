@@ -25,7 +25,7 @@ Every entry below ships as a complete slice, not just code:
 A release is not done when the code works. It is done when someone who has
 never seen it can find it, read why it exists, and run it.
 
-Current release: **0.6.0**. Next: **0.6.1**.
+Current release: **0.6.0**. Next: **0.7.0**.
 
 > **This file tracks what should happen.** What already happened lives in
 > [`CHANGELOG.md`](CHANGELOG.md), and shipped entries are removed from here
@@ -193,7 +193,299 @@ number actually sits.
 
 ---
 
-## 0.6.1 — Release automation, in two stages
+## 0.7.0 — Champion vs challenger
+
+**Branch:** `feat/champion-challenger`
+
+The gate answers one question today: *is this model good enough?* A
+replacement raises a second question that governance cares about more: *is it
+better than the model already in production, and what changes for the people
+it scores?* A challenger can clear every absolute threshold and still be worse
+than the model it replaces. Nothing currently notices.
+
+The seed is already here. `context.baseline_pred` and `DislocationCheck` take
+the incumbent's predictions, but only as a column you computed yourself, and
+only to measure who moves. This release makes the incumbent a first-class
+input. You name the old model, the gate scores it on the same rows as the new
+one, and the comparison produces blocking and non-blocking results like every
+other check.
+
+The names are **champion** (the model in production) and **challenger** (the
+one proposed to replace it). That is the model-risk and insurance vocabulary
+this library's users already speak, and it is harder to misread than
+"baseline", which already means something in `metrics.py`.
+
+### The shape
+
+```python
+from bdp_model_gate import Champion, StructuredGateContext, ModelGate
+
+champion = Champion.from_file("models/scorecard_v3.joblib", sha256="9f2c…")
+
+context = StructuredGateContext(
+    model=challenger,  # the new model, gated in full as today
+    X=X_val,
+    y_true=y_val,
+    y_pred=y_pred,
+    protected_df=protected_val,
+    champion=champion,  # activates the comparison checks
+)
+
+report = ModelGate().run(context)
+print(report.comparison.summary())
+# roc_auc  challenger 0.842  champion 0.821  Δ +0.021 [+0.008, +0.034]  IMPROVED
+```
+
+```bash
+bdp-model-gate --model scorecard_v4.joblib --champion scorecard_v3.joblib \
+  --champion-sha256 9f2c… --data validation.csv --target-col label \
+  --output gate_report.json
+```
+
+Exit codes do not change (`0` / `2` / `1`). The comparison adds results; it
+does not add a new kind of status.
+
+### Decisions, with the reasons
+
+**1. The challenger still runs the full gate. Comparison is added on top and
+never replaces it.** A challenger that beats a bad champion is still BLOCKED
+if it fails fairness, validation or compliance on its own terms. "Better than
+what we had" is not a pass. The reverse also holds: a challenger that passes
+every absolute check but regresses against the champion is BLOCKED by the
+comparison. Status aggregation is untouched, so blocking flags still mean
+`BLOCKED` and non-blocking flags still mean `NEEDS_REVIEW`.
+
+**2. Both models are scored on the same rows, and the interval is on the
+*difference*.** The champion's score from last year's model card is not a
+baseline. It was measured on different data, and comparing across datasets
+measures the data. So the champion is re-scored on today's validation set,
+and each bootstrap resample scores **both** models on the **same** rows
+(a paired bootstrap through the existing `uncertainty.bootstrap`, with the
+statistic returning `metric(challenger) − metric(champion)`).
+
+Checking whether two separate confidence intervals overlap is the tempting
+alternative, and it is wrong. Two models scored on the same rows make
+correlated errors, so the difference is far more precise than either score.
+Overlapping intervals would call a real improvement `UNCERTAIN` almost every
+time. Row-order invariance comes free from `canonical_order`.
+
+**3. The decision rule is non-inferiority, read three ways like every other
+interval.** `Δ` is signed so that positive always means "challenger better",
+using the `greater_is_better` that `MetricSpec` already carries, so RMSE and
+AUC read the same way. Against a margin `δ`:
+
+| Interval of Δ | Flag | Blocking |
+|---|---|---|
+| entirely above `+min_improvement` | `IMPROVED` | — |
+| entirely above `−δ` | `NON_INFERIOR` (OK) | — |
+| straddles `−δ` | `UNCERTAIN` | no, and `on_uncertain` applies |
+| entirely below `−δ` | `REGRESSION` | **yes** |
+
+`ComparisonConfig.require` decides what counts as enough:
+
+- `"non_inferior"` **(default)**: the challenger must not be materially worse.
+  Retraining on fresh data, a cheaper model, a simpler one or one that drops a
+  contested feature are all legitimate reasons to replace a model that is not
+  measurably better. Requiring improvement by default would block every one.
+- `"superior"`: the challenger must be measurably better, and `NON_INFERIOR`
+  becomes `NOT_IMPROVED`, blocking. This is for teams whose change process
+  says a replacement must earn its risk.
+
+**4. The default margin is relative, because no absolute default is honest.**
+`δ = 0.01` means something for AUC and nothing for RMSE on claim costs. So
+`margin_relative = 0.01` (1% of the champion's score) is the default. It is
+unit-free and works for every metric in `metrics.py` and for a custom one.
+`margin` (absolute) overrides it when set. Setting the margin to zero is
+allowed but warned about. With `δ = 0`, two identical models straddle the
+line by construction, so every pure retrain reads `UNCERTAIN`.
+
+**5. One primary metric decides; guardrails can only block on clear harm.**
+The primary metric defaults to `config.performance.metric`, so the comparison
+scores what the absolute gate scores. `ComparisonConfig.guardrails` lists
+secondary metrics that must not regress: Brier or ECE beside AUC, and the
+Lorenz Gini and A/E on a pricing model. Every extra guardrail is another
+chance for sampling noise to block a deploy, so guardrail intervals are
+Bonferroni-widened across the guardrail count. They block only on
+`REGRESSION`; a straddle is `UNCERTAIN`, non-blocking.
+
+### The checks
+
+A new category, `comparison`, reported straight after `validation`. It is the
+question a reviewer of a replacement asks first.
+
+| Check | Blocking | What it asks |
+|---|---|---|
+| `ComparisonIntegrityCheck` | yes | Can these two models be compared at all? Same task; the **same class set in the same order** (a champion with `classes_ = ["no", "yes"]` and a challenger with `["yes", "no"]` produce a confident, inverted comparison and no error); the same label encoding; the champion artifact matches its pinned `sha256`; both models accept the frame. |
+| `ChallengerPerformanceCheck` | yes | Primary metric Δ with its paired interval, read by the table above. |
+| `ChallengerGuardrailCheck` | on regression | Each guardrail metric's Δ, widened for multiplicity. |
+| `SubgroupRegressionCheck` | no | Better on average and worse for someone? Δ per protected group and per `ComparisonConfig.segments` column. An aggregate improvement routinely hides a segment that got worse, and that is a judgement call, so it routes to review like the fairness checks. |
+| `FairnessDeltaCheck` | no | Did a disparity **widen**? A challenger whose demographic-parity gap moves from 0.02 to 0.09 passes an absolute threshold of 0.10 and has still gotten materially less fair. Reports challenger vs champion for each fairness statistic the gate already computes. |
+| `DecisionChurnCheck` | no | For classifiers: how many decisions flip, split into **fixes** (champion wrong, challenger right) and **breaks** (the reverse). Breaks are the number to watch: they are the people for whom a "better" model is worse, and a large break rate under a small net gain is a model that is different rather than better. Regression models already have this in `DislocationCheck`, which now reads the champion's predictions automatically. |
+| `OperationalDeltaCheck` | no | p95 latency and cost per inference, challenger against champion, when both are supplied. A 1-point gain at 4× the cost is a business decision, not a statistical one. |
+
+Every check that compares uses the same paired resamples, so the numbers in
+one report agree with each other.
+
+### Supplying the champion: files, frameworks, and when not to load it at all
+
+The request is "point at an old model file, whatever the format". Most of that
+is easy. The honest limits are worth writing down before someone discovers
+them in a pipeline.
+
+`Champion` accepts four sources, most to least convenient:
+
+```python
+Champion.from_file("v3.joblib")  # a file; format chosen by extension
+Champion(model=estimator)  # an object already in memory
+Champion(predict_fn=fn, predict_proba_fn=fn)  # the same callables ModelAdapter takes
+Champion(predictions=y_old, proba=p_old)  # scores computed elsewhere, same rows
+```
+
+`from_file` dispatches on extension and imports lazily, so the core install
+still pulls in no framework:
+
+| Extension | Loader | Notes |
+|---|---|---|
+| `.joblib`, `.pkl`, `.pickle` | `joblib.load` | what the CLI does today |
+| `.skops` | `skops.io.load` | the safe format; untrusted types refused |
+| `.onnx` | `onnxruntime.InferenceSession` | the input dtype is declared by the model, so nothing is guessed |
+| `.keras`, `.h5` | `keras.models.load_model` | `.predict()` works as it does for `model=` |
+| `.pt`, `.pth`, SavedModel dirs, anything else | **refused**, pointing at `loader=` | see below |
+
+**PyTorch and TensorFlow SavedModel get a loader spec, not a guess.** A `.pt`
+file is either a `state_dict`, which cannot be loaded without the class that
+defines the network, or TorchScript, which can be loaded but whose tensor
+dtype, device and batching are the caller's business. `model.py` already draws
+this line: the library never converts a DataFrame to a tensor, because a wrong
+guess produces plausible numbers rather than an error. So those formats use
+the mechanism the CLI already has:
+
+```python
+Champion.from_loader("mypkg.serving:load_v3")  # returns a model or fn(DataFrame) -> array
+```
+
+```bash
+--champion-loader "mypkg.serving:load_v3"
+```
+
+That same spec covers a registry (MLflow, SageMaker, Vertex). A
+`load_v3` that fetches `models:/scorecard/Production` is three lines on the
+caller's side, so registry URIs are not built in.
+
+**An old pickle often will not load in the new environment.** The champion
+was serialised under last year's scikit-learn, and the challenger's
+environment has this year's. Unpickling across versions either fails or,
+worse, warns and loads a subtly different model. A comparison against the
+wrong champion is worse than none. So:
+
+- Version warnings raised while unpickling (`InconsistentVersionWarning`) are
+  treated as errors. The load fails and says why.
+- The error message names the fallback: score the champion **in its own
+  environment** and pass `Champion(predictions=…)`, or `--champion-col` in the
+  CLI. Predictions computed on the same rows are exactly as valid for every
+  check above except `OperationalDeltaCheck`.
+- A comparison that was asked for and cannot run is a `GateConfigurationError`,
+  never a skipped check. The rule is the one `metric="roc_auc"` already
+  follows: naming something opts out of fallback.
+
+**Loading a pickle runs code.** The champion comes from a registry the team
+controls, so this is acceptable, but it should be a visible choice. The
+report records it: `Champion.describe()` gives the loader used, the file's
+`sha256` and size, and any framework version found in the artifact.
+`sha256=` pins the artifact, and a mismatch blocks through
+`ComparisonIntegrityCheck`. That makes "the model we compared against is the
+one actually in production" something the record proves, not something it
+assumes. `.skops` is recommended in the docs for new champions.
+
+**Different feature sets are normal.** A challenger usually adds features. `X`
+carries the union; each model gets its own columns from its fitted
+`feature_names_in_`, or from `Champion(features=[...])` when the model does not
+record them. `FeatureContractCheck` runs against both.
+
+**Different operating points are normal too.** The champion may have been run
+at a cut-off of 0.42. `Champion(decision_threshold=0.42)` means churn and
+label metrics compare each model at its real threshold, not at a shared 0.5
+that neither used.
+
+### Optional: gate the champion as well
+
+`ComparisonConfig.gate_champion = True` also runs the absolute checks against
+the champion and puts both verdicts side by side. It is **informational only
+and never affects status**. The point is the finding "the incumbent would be
+BLOCKED today on `SubgroupCalibrationCheck`", which is worth knowing before
+anyone argues the challenger is too risky to replace it. It is off by default
+because it roughly doubles the run time.
+
+### The report
+
+- A comparison section in `to_html()`, above the per-check detail. It shows a
+  forest plot of every Δ with its interval and the `−δ` line (the check's
+  `plot()` override, per the existing convention), the 2×2 fixes/breaks
+  matrix, and the champion's provenance block.
+- `report.comparison` in Python, and `"comparison"` in `to_json()`, holding the
+  champion's description, the margin actually used (and whether it was
+  relative), `require`, and each Δ with its interval.
+- `gate_status` stays a single field, because pipelines already branch on it.
+
+### Not in this release
+
+- **More than two models.** Comparing several challengers is model
+  *selection*, which belongs in a training pipeline, not a pre-deployment
+  gate. One champion, one challenger.
+- **Online comparison** (shadow traffic, A/B results). The gate judges a
+  holdout before deployment. Live comparison is monitoring, which is a
+  different product.
+- **Built-in registry URIs.** The loader spec covers them without an adapter
+  per vendor.
+
+### Tests the 0.4.2 guards demand
+
+- **Known answers.** A champion identical to the challenger gives Δ = 0,
+  churn = 0 and `NON_INFERIOR` at the default margin. A champion equal to the
+  challenger plus fixed noise gives `IMPROVED`, and the reverse gives
+  `REGRESSION`.
+- **Invariants.** Antisymmetry: swapping the two models negates every Δ and
+  swaps fixes with breaks exactly. Row order: permuting the validation set
+  cannot move a verdict (the existing invariant, extended). Paired
+  intervals are never wider than unpaired ones on correlated models.
+- **Traps, each with a test that fails without the guard.** Inverted
+  `classes_` order; a `sha256` mismatch; an `InconsistentVersionWarning` on
+  load; a `.pt` path passed to `from_file`; a margin of zero.
+- **Model-family matrix.** Binary, multiclass and regression, each with a
+  file-loaded champion, an in-memory one and a predictions-only one. ONNX and
+  Keras loaders run in the matrix only where the optional dependency is
+  installed, and are skipped visibly otherwise.
+
+### The rest of the slice
+
+- **Example:** `examples/09_champion_challenger.ipynb`. It replaces a
+  scorecard, shows a challenger that improves AUC while breaking decisions for
+  one segment, then loads the champion from a file whose environment has
+  drifted and shows the predictions fallback.
+- **Web:** a new `web/docs/comparison.md`; `models.md` gains the loader table;
+  the landing page's checks grid gains the `comparison` category, which
+  `tests/test_package.py` will require.
+- **CLI:** `--champion`, `--champion-loader`, `--champion-col`,
+  `--champion-proba-cols`, `--champion-sha256`,
+  `--champion-decision-threshold`. `--baseline-col` keeps working as an alias
+  of `--champion-col` for `DislocationCheck` users.
+- **Config:** `ComparisonConfig` in JSON/YAML/TOML like every other section.
+
+### Checklist
+
+- [ ] `Champion` with `from_file`, `from_loader`, `model=`, `predict_fn=`,
+      `predictions=`; lazy extension dispatch; version warnings as errors
+- [ ] Paired Δ statistic on top of `uncertainty.bootstrap`, signed by
+      `greater_is_better`
+- [ ] `ComparisonConfig`: `metric`, `margin`, `margin_relative`,
+      `min_improvement`, `require`, `guardrails`, `segments`, `gate_champion`
+- [ ] The seven checks above, in a new `comparison` category
+- [ ] `DislocationCheck` reads champion predictions when `baseline_pred` is absent
+- [ ] Provenance in `report.comparison`, JSON and HTML
+- [ ] CLI flags; `--baseline-col` aliased
+- [ ] Notebook 09, docs page, landing page, CHANGELOG
+
+## 0.8.0 — Release automation, in two stages
 
 **Branch:** `feat/release-automation`
 
