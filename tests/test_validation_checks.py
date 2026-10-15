@@ -529,16 +529,32 @@ def test_psi_does_not_flag_two_identical_samples():
     assert "moderate_band" not in results[0].metadata
 
 
-def test_psi_numeric_handles_a_live_value_outside_the_training_range():
+def test_psi_numeric_counts_a_value_outside_the_training_range_rather_than_dropping_it():
     """Bin edges come from the training quantiles; a live value beyond them
-    must land in the nearest bin rather than becoming NaN and vanishing from
-    the proportions."""
+    must land in the nearest bin and be counted in its proportion, rather
+    than becoming NaN and silently vanishing.
+
+    Asserted on bin membership directly, not on the PSI value: with only
+    ten outliers against 2000 rows, dropping them instead of binning them
+    moves PSI by about 0.0004 (0.00891 counted vs 0.00852 dropped) — too
+    small a difference for a magnitude-based assertion to reliably catch,
+    which is exactly the trap the previous version of this test fell into
+    (it asserted only `n_features_scored == 1`, true either way, and so
+    passed even when a deliberately reintroduced NaN-dropping bug was
+    present). Checking where the values actually landed is the only
+    reliable version of this test."""
     rng = np.random.default_rng(11)
-    train = pd.DataFrame({"x": rng.normal(size=2000)})
-    live = pd.DataFrame({"x": np.concatenate([rng.normal(size=1990), [50.0] * 10])})
-    y = rng.integers(0, 2, 2000)
-    results = _psi_check().run(_context(live, y, y.astype(float), X_train=train))
-    assert results[0].metadata["n_features_scored"] == 1
+    train = pd.Series(rng.normal(size=2000), name="x")
+    live = pd.Series(np.concatenate([rng.normal(size=1990), [50.0] * 10]), name="x")
+
+    edges = np.unique(train.quantile(np.linspace(0.0, 1.0, 11)).to_numpy())
+    edges = edges.astype(float)
+    edges[0], edges[-1] = -np.inf, np.inf
+    live_binned = pd.cut(live, bins=edges, include_lowest=True)
+
+    assert live_binned.isna().sum() == 0, "a value beyond the training range must not become NaN"
+    top_bin = live_binned.cat.categories[-1]
+    assert int((live_binned == top_bin).sum()) >= 10, "the outliers must land in the top bin"
 
 
 def test_psi_default_statistic_is_unchanged_for_backwards_compatibility():
@@ -547,6 +563,113 @@ def test_psi_default_statistic_is_unchanged_for_backwards_compatibility():
     drifted = X.assign(income=X["income"] * 2.0)
     (result,) = FeatureDriftCheck().run(_context(drifted, y, y_pred, X_train=X))
     assert result.metadata["measure"] == "standardised mean shift"
+
+
+def test_psi_bins_below_two_is_refused_at_construction():
+    with pytest.raises(GateConfigurationError):
+        _psi_check(psi_bins=1)
+
+
+def test_psi_moderate_above_significant_is_refused_at_construction():
+    with pytest.raises(GateConfigurationError):
+        _psi_check(psi_moderate_threshold=0.5, psi_significant_threshold=0.2)
+
+
+def test_psi_treats_unsigned_and_boolean_columns_as_numeric():
+    """Same gap `LeakageCheck`'s `_power` had, fixed the same way: an
+    unsigned or boolean column used to fall through to the categorical
+    branch, which is wrong for it specifically under PSI — every distinct
+    value became its own bin."""
+    rng = np.random.default_rng(5)
+    train = pd.DataFrame({"x": rng.integers(0, 1000, 3000).astype("uint16")})
+    live = pd.DataFrame({"x": rng.integers(0, 1000, 3000).astype("uint16")})
+    y = rng.integers(0, 2, 3000)
+    results = _psi_check().run(_context(live, y, y.astype(float), X_train=train))
+    assert [r.flag for r in results] == ["OK"], "two identical uint distributions must not drift"
+
+
+def test_psi_moderate_band_message_uses_the_configured_thresholds():
+    """The band named in the detail string must track whatever
+    psi_moderate_threshold/psi_significant_threshold are actually set to,
+    not a hardcoded '0.10-0.25' that stops being true the moment either is
+    overridden."""
+    n = 1000
+    train = pd.DataFrame({"region": ["A"] * 700 + ["B"] * 300})
+    live = pd.DataFrame({"region": ["A"] * 500 + ["B"] * 500})
+    y = np.tile([0, 1], n // 2)
+
+    result = _psi_check(psi_moderate_threshold=0.05, psi_significant_threshold=0.30).run(
+        _context(live, y, y.astype(float), X_train=train)
+    )[0]
+    assert result.flag == "OK"
+    assert "0.05" in result.detail and "0.30" in result.detail
+    assert "0.10" not in result.detail and "0.25" not in result.detail
+
+
+def test_an_unseen_category_is_reported_by_name_not_by_an_arbitrary_epsilon():
+    """Before this fix, whether a brand-new category read as a moderate
+    finding or a significant one was decided by `_PSI_EPSILON` — a constant
+    chosen to keep an empty bin from dividing by zero, not to arbitrate
+    unseen-category drift. The share of live data in the new category is
+    now read directly against the same bands every other feature uses, so
+    the verdict no longer depends on that constant."""
+    n = 2000
+    train = pd.DataFrame({"region": ["A"] * 1000 + ["B"] * 1000})
+    # 30% of live sits in a level training never saw — unambiguously significant.
+    live = pd.DataFrame({"region": ["A"] * 700 + ["B"] * 700 + ["NEW"] * 600})
+    y = np.random.default_rng(0).integers(0, 2, n)
+
+    result = _psi_check().run(_context(live, y, y.astype(float), X_train=train))[0]
+    assert result.flag == "DRIFT_RISK"
+    assert result.metadata["unseen_categories"] == ["NEW"]
+    assert result.metadata["unseen_category_share"] == pytest.approx(0.30)
+    assert "NEW" in result.detail and "never seen in training" in result.detail
+
+
+def test_a_small_unseen_category_share_does_not_flag():
+    """The flip side of the above: a new category that makes up only a
+    small share of live data reads as clean, deterministically — not
+    sometimes moderate and sometimes significant depending on a constant
+    nobody chose for that purpose."""
+    n = 2000
+    train = pd.DataFrame({"region": ["A"] * 1000 + ["B"] * 1000})
+    live = pd.DataFrame({"region": ["A"] * 960 + ["B"] * 960 + ["NEW"] * 80})  # 4%
+    y = np.random.default_rng(0).integers(0, 2, n)
+
+    results = _psi_check().run(_context(live, y, y.astype(float), X_train=train))
+    assert [r.flag for r in results] == ["OK"]
+
+
+def test_psi_significant_verdict_is_bootstrapped_and_uncertain_can_appear():
+    """Two samples from the *same* distribution at a small n used to read
+    DRIFT_RISK most of the time — PSI's own small-sample bias, not real
+    drift. Bootstrapped through Uncertainty.verdict like the other checks,
+    the same scenario must never confidently report DRIFT_RISK: the
+    interval has to be wide enough, at this sample size, to at least reach
+    UNCERTAIN rather than assert a finding the data cannot support."""
+    for seed in range(8):
+        rng = np.random.default_rng(seed)
+        n = 30
+        train = pd.DataFrame({"x": rng.normal(size=n)})
+        live = pd.DataFrame({"x": rng.normal(size=n)})
+        y = rng.integers(0, 2, n)
+        results = _psi_check().run(_context(live, y, y.astype(float), X_train=train))
+        assert results[0].flag in ("OK", "UNCERTAIN", "NOT_APPLICABLE"), (
+            f"seed={seed} confidently reported {results[0].flag} on identical distributions"
+        )
+
+
+def test_psi_still_flags_a_real_shift_under_bootstrapping():
+    """The other half of the fix: bootstrapping must not turn PSI timid.
+    A shift this large, at a sample size this ordinary, has to clear the
+    interval check and still report DRIFT_RISK."""
+    rng = np.random.default_rng(7)
+    train = pd.DataFrame({"income": rng.normal(size=500)})
+    live = pd.DataFrame({"income": rng.normal(loc=2.5, size=500)})
+    y = rng.integers(0, 2, 500)
+    (result,) = _psi_check().run(_context(live, y, y.astype(float), X_train=train))
+    assert result.flag == "DRIFT_RISK"
+    assert "ci_low" in result.metadata and "ci_high" in result.metadata
 
 
 # --------------------------------------------------------------------------

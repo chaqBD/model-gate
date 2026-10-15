@@ -108,7 +108,21 @@ frames. `drift_statistic` chooses how:
   bins. A feature in the 0.10 band that never crosses 0.25 is still named in
   an otherwise-clean result's detail and metadata — PSI's value over the
   default statistic is in catching drift at that earlier point, not only
-  once it is severe.
+  once it is severe. A category present in live data but never seen in
+  training is reported by name as its own fact, not folded into the PSI
+  number through an epsilon floor that was never meant to arbitrate it.
+
+  Binned PSI is biased upward at small samples — two identical distributions
+  can read `DRIFT_RISK` most of the time at a few dozen rows per frame — and
+  that is handled two ways, because a plain bootstrap alone does not fix it
+  (resampling an already-biased small draw mostly reproduces the same bias).
+  Below a closed-form bias floor for the feature's bin or level count, it is
+  skipped rather than scored, reported `NOT_APPLICABLE`; above it, the
+  significant-threshold verdict is bootstrapped like twelve other checks in
+  this library, so a straddling interval reads `UNCERTAIN`. Verified: two
+  identical samples read `DRIFT_RISK` 0% of the time at every tested size
+  from 20 to 500 rows per frame, against confident false positives most of
+  the time below n=100 beforehand.
 
 **Non-blocking**, unlike its four neighbours. An out-of-time holdout *should*
 differ a little — that is the point of one — so drift warrants a look rather

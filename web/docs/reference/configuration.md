@@ -50,13 +50,27 @@ Index instead of standardised mean shift / total variation distance, scoring
 numeric and categorical features through the same bands —
 `psi_moderate_threshold` and `psi_significant_threshold` — rather than the
 separate numeric/categorical thresholds the default statistic needs. A
-typo'd `drift_statistic` is rejected with `GateConfigurationError` as soon
-as the check is built, not partway through a run:
+typo'd `drift_statistic`, `psi_bins < 2`, or `psi_moderate_threshold` set
+above `psi_significant_threshold` is rejected with `GateConfigurationError`
+as soon as the check is built, not partway through a run:
 
 ```python
 config.validation.drift_statistic = "psi"
 config.validation.psi_significant_threshold = 0.20  # tighter than the 0.25 convention
 ```
+
+Binned PSI is biased upward at small samples, badly enough that two
+identical distributions can read `DRIFT_RISK` most of the time under a
+hundred rows per frame. `psi_bins` is the lever for it: a per-feature bias
+floor, `(psi_bins - 1) * (1/n_train + 1/n_live)`, has to sit below
+`psi_moderate_threshold` before a feature is scored at all — below it, the
+feature reports `NOT_APPLICABLE` rather than a point estimate the bias
+dominates. Lowering `psi_bins` (fewer, coarser bins) or raising
+`psi_moderate_threshold` both lower that floor; the other lever is more
+rows. Above the floor, the significant-threshold verdict is bootstrapped
+through the same `UncertaintyConfig` every interval-aware check already
+shares, so `uncertainty.bootstrap_samples`, `uncertainty.confidence_level`
+and `uncertainty.on_uncertain` all apply to it exactly as they do elsewhere.
 
 ```python
 config.validation.leakage_min_power = 0.90  # quieter on a strong model

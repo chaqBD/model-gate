@@ -33,12 +33,13 @@ import pandas as pd
 
 from .._logging import get_logger
 from ..classes import favourable_mask, resolve_favourable
-from ..config import ComplianceConfig, ValidationConfig
+from ..config import ComplianceConfig, UncertaintyConfig, ValidationConfig
 from ..core.base import BaseCheck, CheckResult
 from ..exceptions import GateConfigurationError
 from ..metrics import to_class_labels
 from ..stats import correlation_ratio, pearson_r, rank_auc
 from ..task import MULTICLASS, REGRESSION, resolve_task
+from ..uncertainty import ABOVE, Uncertainty
 
 logger = get_logger("validation_checks")
 
@@ -46,6 +47,11 @@ logger = get_logger("validation_checks")
 _MIN_ROWS = 20
 #: `ValidationConfig.drift_statistic` accepts only these.
 _DRIFT_STATISTICS = ("standardised_shift", "psi")
+#: Dtype kinds `FeatureDriftCheck` treats as numeric for either statistic:
+#: signed/unsigned int, float, bool. A uint or bool column used to fall
+#: through to the categorical branch, which is wrong for it specifically
+#: under PSI — every distinct value becomes its own bin.
+_NUMERIC_DTYPE_KINDS = "ifub"
 #: Floor applied to a bin's proportion before taking its log, so an empty bin
 #: in either frame doesn't divide by zero or take log(0). Standard fix for
 #: this statistic; at 1e-4 it cannot move a verdict near either PSI band.
@@ -613,32 +619,72 @@ class FeatureDriftCheck(BaseCheck):
 
     - `"standardised_shift"` (default) — a numeric feature is compared by
       standardised mean shift, so the threshold is unitless; a categorical
-      feature by total variation distance between frequency tables.
+      feature by total variation distance between frequency tables. Point
+      estimate only, unchanged from before PSI existed.
     - `"psi"` — the Population Stability Index, the measure credit-risk
-      auditors recognise by name, with the convention's own fixed bands
+      auditors recognise by name for a *feature's* distribution (the
+      score's own drift is usually called PSI too and the per-feature
+      version CSI — see the docs), with the convention's own fixed bands
       (0.10 "worth a look", 0.25 "significant") applying to numeric and
       categorical features alike. A numeric feature is cut into
       `psi_bins` quantile bins (deciles, by default) using edges taken from
       the *training* distribution, so a live value outside that range still
       falls in the nearest bin rather than being dropped; a categorical
       feature uses its existing category levels as the bins, no cutting
-      needed. A feature that reaches the 0.10 band without crossing 0.25 is
-      still surfaced, alongside an otherwise-clean result, rather than
-      silently folded into `OK` — catching drift at 0.10, before it becomes
-      severe, is the reason to reach for PSI over the default statistic.
+      needed. A feature that reaches the moderate band without crossing the
+      significant one is still named, alongside an otherwise-clean result,
+      rather than silently folded into `OK` — catching drift early, before
+      it becomes severe, is the reason to reach for PSI over the default
+      statistic.
+
+      Binned PSI is biased upward under the null at small samples — two
+      identical distributions can read `DRIFT_RISK` most of the time at
+      n=20-50 — and this is handled two ways, because they fix different
+      halves of it. Below a per-feature bias floor (derived from the
+      closed-form approximation of that bias, `(bins-1)*(1/n_train +
+      1/n_live)`), the feature is skipped rather than scored: a plain
+      percentile bootstrap does **not** fix this on its own, because
+      resampling an already-biased small draw mostly reproduces the same
+      bias rather than correcting for it. Above the floor, the
+      significant-threshold verdict **is** bootstrapped, the same way
+      twelve other checks already are, so a straddling interval reports
+      `UNCERTAIN` rather than a confident finding the data cannot support.
+
+      A category present in live data but never seen in training is
+      reported by name, as its own fact, rather than folded into PSI
+      through the epsilon floor — that floor is only correct for a known
+      level's count being small in one frame, and an unseen level is a
+      different claim entirely.
     """
 
     name = "feature_drift"
     category = "validation"
     blocking = False
 
-    def __init__(self, config: ValidationConfig | None = None):
+    def __init__(
+        self,
+        config: ValidationConfig | None = None,
+        uncertainty: UncertaintyConfig | None = None,
+    ):
         self.config = config or ValidationConfig()
         if self.config.drift_statistic not in _DRIFT_STATISTICS:
             raise GateConfigurationError(
                 f"validation.drift_statistic={self.config.drift_statistic!r} — must be "
                 f"one of {', '.join(_DRIFT_STATISTICS)}"
             )
+        if self.config.psi_bins < 2:
+            raise GateConfigurationError(
+                f"validation.psi_bins={self.config.psi_bins!r} — must be at least 2, or "
+                "every numeric feature falls in one bin and PSI is always 0"
+            )
+        if self.config.psi_moderate_threshold > self.config.psi_significant_threshold:
+            raise GateConfigurationError(
+                f"validation.psi_moderate_threshold="
+                f"{self.config.psi_moderate_threshold!r} exceeds "
+                f"psi_significant_threshold={self.config.psi_significant_threshold!r} — "
+                "the moderate band would never be reachable"
+            )
+        self.uncertainty = Uncertainty(uncertainty)
 
     def _numeric_shift(self, train: pd.Series, live: pd.Series) -> float | None:
         spread = float(train.std())
@@ -666,9 +712,11 @@ class FeatureDriftCheck(BaseCheck):
     @staticmethod
     def _psi_from_shares(train_share: pd.Series, live_share: pd.Series, levels) -> float:
         """PSI over aligned proportion tables, flooring each at `_PSI_EPSILON`
-        first so an empty bin in either frame cannot divide by zero or take
-        log(0) — the standard fix, and at this floor it cannot itself move a
-        verdict near either band."""
+        first so a level present in both frames but absent in one resample
+        cannot divide by zero or take log(0). Correct only for levels that
+        genuinely occur in both frames — a level training never saw at all
+        is excluded from `levels` by the caller, not floored here; see
+        `_unseen_categories`."""
         train_p = np.array(
             [max(float(train_share.get(level, 0.0)), _PSI_EPSILON) for level in levels]
         )
@@ -677,21 +725,102 @@ class FeatureDriftCheck(BaseCheck):
         )
         return float(np.sum((live_p - train_p) * np.log(live_p / train_p)))
 
-    def _psi_categorical(self, train: pd.Series, live: pd.Series) -> float:
-        train_share, live_share, levels = self._shares(train, live)
-        return self._psi_from_shares(train_share, live_share, levels)
+    @staticmethod
+    def _unseen_categories(
+        train_share: pd.Series, live_share: pd.Series
+    ) -> list[tuple[str, float]]:
+        """Levels present in live data that never occurred in training, with
+        their live share, strongest first. `_PSI_EPSILON` must not decide
+        whether these count as drift — see `_categorical_psi_with_unseen`."""
+        return sorted(
+            (
+                (str(level), float(live_share[level]))
+                for level in live_share.index
+                if level not in train_share.index and live_share[level] > 0
+            ),
+            key=lambda pair: -pair[1],
+        )
 
-    def _psi_numeric(self, train: pd.Series, live: pd.Series, bins: int) -> float | None:
+    def _categorical_psi_with_unseen(
+        self, train: pd.Series, live: pd.Series
+    ) -> tuple[float, float, list[tuple[str, float]], int]:
+        """`(shift, known_level_psi, unseen_categories, n_levels)`.
+
+        `shift` — what gets read against the moderate/significant bands and
+        bootstrapped — is the worse of two different claims: PSI computed
+        only over levels training actually saw (where the epsilon floor is
+        the right tool), and the total live share sitting in levels training
+        never saw at all (where it is not, so that mass is read directly
+        rather than floored and logged). `n_levels` is the categorical
+        analogue of a numeric feature's bin count, for `_psi_bias_floor`.
+        """
+        train_share, live_share, _ = self._shares(train, live)
+        known_levels = train_share.index
+        known_psi = self._psi_from_shares(train_share, live_share, known_levels)
+        unseen = self._unseen_categories(train_share, live_share)
+        unseen_share = sum(share for _, share in unseen)
+        return max(known_psi, unseen_share), known_psi, unseen, len(known_levels)
+
+    @staticmethod
+    def _psi_bias_floor(n_levels: int, n_train: int, n_live: int) -> float:
+        """Binned/leveled PSI's own upward bias under the null — roughly
+        `(levels - 1) * (1/n_train + 1/n_live)`, a closed-form approximation
+        rather than a resampling result, so it is checked directly instead
+        of discovered empirically each run.
+
+        This exists *beside* bootstrapping, not instead of it, because a
+        plain percentile bootstrap does not fix it: at the sample sizes this
+        bites hardest, resampling the same small, already-skewed draw mostly
+        reproduces the same skew rather than correcting for it (verified —
+        two identical n=30 samples still confidently read `DRIFT_RISK` under
+        the bootstrapped verdict alone, PSI 1.7 with a tight interval).
+        Below this floor, the feature is skipped rather than scored as if
+        its bias were sampling noise.
+        """
+        return (n_levels - 1) * (1.0 / n_train + 1.0 / n_live)
+
+    def _psi_numeric(
+        self, train: pd.Series, live: pd.Series, bins: int
+    ) -> tuple[float, int] | None:
+        """`(psi, n_bins_used)`, or None. `n_bins_used` can be less than
+        `psi_bins` when quantile edges collapse under a zero-inflated or
+        otherwise repeated-value feature — worth knowing, since PSI's scale
+        depends on how many bins it was computed over."""
         edges = np.unique(train.quantile(np.linspace(0.0, 1.0, bins + 1)).to_numpy())
         if len(edges) < 2:
             return None  # constant in training; no spread to bin on
         edges = edges.astype(float)
         edges[0], edges[-1] = -np.inf, np.inf
-        train_binned = pd.cut(train, bins=edges, include_lowest=True)
-        live_binned = pd.cut(live, bins=edges, include_lowest=True)
+        bin_edges = pd.Index(edges)
+        train_binned = pd.cut(train, bins=bin_edges, include_lowest=True)
+        live_binned = pd.cut(live, bins=bin_edges, include_lowest=True)
         train_share = train_binned.value_counts(normalize=True)
         live_share = live_binned.value_counts(normalize=True)
-        return self._psi_from_shares(train_share, live_share, train_share.index)
+        psi = self._psi_from_shares(train_share, live_share, train_share.index)
+        return psi, len(edges) - 1
+
+    def _psi_bootstrap_statistic(self, joint: pd.DataFrame, numeric: bool, bins: int):
+        """A callable over row *positions* into `joint` (columns `value`,
+        `is_live`), suitable for `Uncertainty.interval` — recomputes the same
+        point statistic on whatever each resample contains, bin edges (for a
+        numeric feature) included, so the interval reflects edge-estimation
+        noise along with everything else."""
+
+        def statistic(positions: np.ndarray) -> float:
+            sub = joint.iloc[positions]
+            tr = sub.loc[~sub["is_live"], "value"]
+            lv = sub.loc[sub["is_live"], "value"]
+            if len(tr) < 2 or len(lv) < 2:
+                raise ValueError("degenerate resample: a group vanished")
+            if numeric:
+                result = self._psi_numeric(tr, lv, bins)
+                if result is None:
+                    raise ValueError("degenerate resample: no spread to bin on")
+                return result[0]
+            shift, _, _, _ = self._categorical_psi_with_unseen(tr, lv)
+            return shift
+
+        return statistic
 
     def run(self, context) -> list[CheckResult]:
         train = context.X_train
@@ -709,52 +838,180 @@ class FeatureDriftCheck(BaseCheck):
             )
 
         use_psi = self.config.drift_statistic == "psi"
-        drifted, moderate, scored = [], [], 0
+        findings, moderate, scored = [], [], 0
+        insufficient_for_psi: list[tuple[str, int, float]] = []
+
         for feature in shared:
             reference, live = train[feature].dropna(), context.X[feature].dropna()
             if len(reference) < _MIN_ROWS or len(live) < _MIN_ROWS:
                 continue
-            numeric = reference.dtype.kind in "if" and live.dtype.kind in "if"
+            numeric = (
+                reference.dtype.kind in _NUMERIC_DTYPE_KINDS
+                and live.dtype.kind in _NUMERIC_DTYPE_KINDS
+            )
 
-            if use_psi:
-                shift = (
-                    self._psi_numeric(reference, live, self.config.psi_bins)
-                    if numeric
-                    else self._psi_categorical(reference, live)
-                )
-                limit = self.config.psi_significant_threshold
-                unit = "PSI"
-            elif numeric:
-                shift = self._numeric_shift(reference, live)
-                limit = self.config.drift_threshold
-                unit = "standardised mean shift"
+            if not use_psi:
+                if numeric:
+                    shift = self._numeric_shift(reference, live)
+                    limit = self.config.drift_threshold
+                    unit = "standardised mean shift"
+                else:
+                    shift = self._categorical_shift(reference, live)
+                    limit = self.config.categorical_drift_threshold
+                    unit = "total variation distance"
+                if shift is None:
+                    continue
+                scored += 1
+                if shift > limit:
+                    findings.append(
+                        CheckResult(
+                            self.name,
+                            self.category,
+                            "DRIFT_RISK",
+                            detail=(
+                                f"{feature}: {unit} {shift:.3f} between training and "
+                                f"validation (max {limit}) — the model is being graded "
+                                "on a different population from the one it was fitted to"
+                            ),
+                            blocking=self.blocking,
+                            metadata={
+                                "feature": feature,
+                                "shift": round(shift, 4),
+                                "threshold": limit,
+                                "measure": unit,
+                                "n_features_scored": None,  # filled in once scored is final
+                            },
+                        )
+                    )
+                continue
+
+            # drift_statistic == "psi"
+            extra_meta: dict = {}
+            note_suffix = ""
+            if numeric:
+                result = self._psi_numeric(reference, live, self.config.psi_bins)
+                if result is None:
+                    continue
+                shift, n_levels = result
+                extra_meta["n_bins_used"] = n_levels
             else:
-                shift = self._categorical_shift(reference, live)
-                limit = self.config.categorical_drift_threshold
-                unit = "total variation distance"
+                shift, known_psi, unseen, n_levels = self._categorical_psi_with_unseen(
+                    reference, live
+                )
+                extra_meta["known_level_psi"] = round(known_psi, 4)
+                if unseen:
+                    unseen_share = sum(s for _, s in unseen)
+                    named = ", ".join(f"{lvl!r} ({s:.1%})" for lvl, s in unseen[:3])
+                    more = f", +{len(unseen) - 3} more" if len(unseen) > 3 else ""
+                    plural = "y" if len(unseen) == 1 else "ies"
+                    note_suffix = (
+                        f" — {len(unseen)} categor{plural} never seen in training make up "
+                        f"{unseen_share:.1%} of live data: {named}{more}"
+                    )
+                    extra_meta["unseen_category_share"] = round(unseen_share, 4)
+                    extra_meta["unseen_categories"] = [lvl for lvl, _ in unseen[:5]]
 
-            if shift is None:
+            bias_floor = self._psi_bias_floor(n_levels, len(reference), len(live))
+            if bias_floor >= self.config.psi_moderate_threshold:
+                # PSI's own small-sample bias would sit at or above the
+                # moderate band on its own, for *this many* bins or levels —
+                # not enough data to tell a real shift from the statistic's
+                # own noise floor, so this feature is skipped rather than
+                # scored as if that bias were evidence.
+                insufficient_for_psi.append((feature, n_levels, bias_floor))
                 continue
             scored += 1
-            if shift > limit:
-                drifted.append((feature, shift, limit, unit))
-            elif use_psi and shift >= self.config.psi_moderate_threshold:
-                moderate.append((feature, shift))
+
+            joint = pd.DataFrame(
+                {
+                    "value": pd.concat([reference, live], ignore_index=True),
+                    "is_live": [False] * len(reference) + [True] * len(live),
+                }
+            )
+            interval = self.uncertainty.interval(
+                self._psi_bootstrap_statistic(joint, numeric, self.config.psi_bins),
+                joint,
+            )
+            verdict = self.uncertainty.verdict(
+                interval,
+                self.config.psi_significant_threshold,
+                point=shift,
+                risk_flag="DRIFT_RISK",
+                blocking=self.blocking,
+                flag_when=ABOVE,
+            )
+
+            if verdict.flag == "OK":
+                if shift >= self.config.psi_moderate_threshold:
+                    moderate.append((feature, shift))
+                continue
+
+            findings.append(
+                CheckResult(
+                    self.name,
+                    self.category,
+                    verdict.flag,
+                    detail=(
+                        f"{feature}: PSI {self.uncertainty.measured(interval, shift)} "
+                        f"between training and validation (max "
+                        f"{self.config.psi_significant_threshold}) — the model is being "
+                        "graded on a different population from the one it was fitted to"
+                        f"{verdict.note}{note_suffix}"
+                    ),
+                    blocking=verdict.blocking,
+                    metadata={
+                        "feature": feature,
+                        "shift": round(shift, 4),
+                        "threshold": self.config.psi_significant_threshold,
+                        "measure": "PSI",
+                        "n_features_scored": None,
+                        **extra_meta,
+                        **verdict.metadata,
+                    },
+                )
+            )
 
         if not scored:
+            if insufficient_for_psi:
+                worst = max(insufficient_for_psi, key=lambda row: row[2])
+                return _not_applicable(
+                    self,
+                    f"{len(insufficient_for_psi)} shared feature(s) had enough rows for "
+                    f"{_MIN_ROWS}-row scoring but not enough for a trustworthy PSI at "
+                    f"their bin/level count — e.g. {worst[0]} ({worst[1]} bins/levels) "
+                    f"would carry a small-sample bias of about {worst[2]:.3f} on its own, "
+                    f"at or above psi_moderate_threshold={self.config.psi_moderate_threshold}. "
+                    "Lower psi_bins, gather more rows, or use drift_statistic="
+                    "'standardised_shift' instead.",
+                )
             return _not_applicable(
                 self,
                 f"no shared feature had at least {_MIN_ROWS} usable rows in both frames",
             )
-        if not drifted:
+
+        for finding in findings:
+            finding.metadata["n_features_scored"] = scored
+
+        if not findings:
             detail = f"no drift above threshold across {scored} shared feature(s)"
             metadata: dict = {"n_features_scored": scored}
+            if insufficient_for_psi:
+                detail += (
+                    f"; {len(insufficient_for_psi)} other feature(s) had too few rows for "
+                    "a trustworthy PSI at their bin/level count and were skipped rather "
+                    "than scored"
+                )
+                metadata["insufficient_for_psi"] = [
+                    {"feature": f, "levels": lv, "bias_floor": round(b, 4)}
+                    for f, lv, b in insufficient_for_psi
+                ]
             if moderate:
                 moderate.sort(key=lambda pair: -pair[1])
                 named = ", ".join(f"{feature} ({psi:.3f})" for feature, psi in moderate)
+                lo, hi = self.config.psi_moderate_threshold, self.config.psi_significant_threshold
                 detail += (
-                    f"; {len(moderate)} sit in PSI's 0.10–0.25 'moderate' band, worth "
-                    f"a look before it becomes significant: {named}"
+                    f"; {len(moderate)} feature(s) sit in PSI's {lo:.2f}–{hi:.2f} "
+                    f"'moderate' band, worth a look before it becomes significant: {named}"
                 )
                 metadata["moderate_band"] = [
                     {"feature": feature, "psi": round(psi, 4)} for feature, psi in moderate
@@ -770,27 +1027,7 @@ class FeatureDriftCheck(BaseCheck):
                 )
             ]
 
-        return [
-            CheckResult(
-                self.name,
-                self.category,
-                "DRIFT_RISK",
-                detail=(
-                    f"{feature}: {unit} {shift:.3f} between training and validation "
-                    f"(max {limit}) — the model is being graded on a different population "
-                    "from the one it was fitted to"
-                ),
-                blocking=self.blocking,
-                metadata={
-                    "feature": feature,
-                    "shift": round(shift, 4),
-                    "threshold": limit,
-                    "measure": unit,
-                    "n_features_scored": scored,
-                },
-            )
-            for feature, shift, limit, unit in sorted(drifted, key=lambda row: -row[1])
-        ]
+        return sorted(findings, key=lambda r: -r.metadata["shift"])
 
 
 __all__ = [

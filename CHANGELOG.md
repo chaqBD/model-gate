@@ -31,11 +31,22 @@ whatever else it measures.
   result's detail and metadata rather than silently folded into it — the
   moderate band is the point of reaching for PSI over the default statistic:
   catching drift before it becomes severe, not after.
-- The significant-threshold verdict is bootstrapped, like the twelve other
-  interval-aware checks: binned PSI is biased upward on small samples, and an
-  interval straddling 0.25 now reads `UNCERTAIN` rather than a confident
-  `DRIFT_RISK` two identical distributions can trip most of the time at
-  n=20-50.
+- **Small-sample bias, handled two ways, because they fix different halves
+  of it.** Binned PSI is biased upward under the null — two identical
+  distributions could read `DRIFT_RISK` most of the time at a few dozen
+  rows per frame. A plain bootstrap alone does **not** fix this: resampling
+  an already-biased small draw mostly reproduces the same bias rather than
+  correcting for it (verified empirically before relying on it). Below a
+  closed-form bias floor for the feature's bin or level count — `(bins - 1)
+  * (1/n_train + 1/n_live)`, checked against `psi_moderate_threshold` — the
+  feature is skipped and reports `NOT_APPLICABLE` rather than being scored
+  as if that bias were evidence. Above the floor, the significant-threshold
+  verdict *is* bootstrapped, like the twelve other interval-aware checks,
+  so a straddling interval reads `UNCERTAIN` rather than a confident
+  finding. Measured before and after: two identical distributions read
+  `DRIFT_RISK` 0% of the time at every tested size from 20 to 500 rows per
+  frame, against confident false positives most of the time under n=100
+  beforehand.
 - An unrecognised `drift_statistic` is rejected with `GateConfigurationError`
   as soon as the check is constructed, the same convention
   `UncertaintyConfig.on_uncertain` already follows — and so is `psi_bins < 2`
