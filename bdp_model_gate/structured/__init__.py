@@ -12,6 +12,16 @@ from .calibration_checks import (
     EqualisedOddsCheck,
     SubgroupCalibrationCheck,
 )
+from .comparison_checks import (
+    ChallengerGuardrailCheck,
+    ChallengerPerformanceCheck,
+    ComparisonIntegrityCheck,
+    DecisionChurnCheck,
+    FairnessDeltaCheck,
+    OperationalDeltaCheck,
+    SubgroupRegressionCheck,
+    comparison_checks,
+)
 from .compliance import ComplianceMappingCheck
 from .fairness import (
     CounterfactualFlipCheck,
@@ -62,6 +72,11 @@ def default_structured_checks(config: GateConfig | None = None, include_plugins:
         ValidationStrategyCheck(config.validation, config.compliance),
         FeatureContractCheck(config.validation),
         FeatureDriftCheck(config.validation),
+        # Then the comparison, when a champion is supplied: the first question
+        # a reviewer of a replacement asks. NOT_APPLICABLE without one.
+        *comparison_checks(
+            config.comparison, config.performance, config.uncertainty, config.fairness
+        ),
         ProxyCorrelationCheck(config.fairness, config.uncertainty),
         DisparateImpactCheck(config.fairness, config.uncertainty),
         ShapSubgroupCheck(config.fairness, config.uncertainty),
@@ -101,6 +116,14 @@ def default_structured_checks(config: GateConfig | None = None, include_plugins:
 
 
 __all__ = [
+    "ChallengerGuardrailCheck",
+    "ChallengerPerformanceCheck",
+    "ComparisonIntegrityCheck",
+    "DecisionChurnCheck",
+    "FairnessDeltaCheck",
+    "OperationalDeltaCheck",
+    "SubgroupRegressionCheck",
+    "comparison_checks",
     "ActualVsExpectedCheck",
     "DislocationCheck",
     "MonotonicityCheck",

@@ -15,6 +15,7 @@ Quickstart:
         cost_per_inference=0.0008,           # optional
         model_card=my_model_card,            # optional — enables compliance checks
         generate_fn=None,                    # optional — set if there's a generative side-car
+        champion=Champion.from_file("v3.joblib"),  # optional — compare against the incumbent
     )
 
     report = ModelGate().run(context)
@@ -25,8 +26,10 @@ Unstructured-data (text/image/audio) support is planned — see
 `bdp_model_gate.unstructured` for the reserved, not-yet-implemented interface.
 """
 
+from .champion import Champion
 from .config import (
     ActuarialConfig,
+    ComparisonConfig,
     ComplianceConfig,
     FairnessConfig,
     GateConfig,
@@ -64,8 +67,10 @@ __all__ = [
     "GateReport",
     "ModelGate",
     "StructuredGateContext",
+    "Champion",
     "GateConfig",
     "ActuarialConfig",
+    "ComparisonConfig",
     "FairnessConfig",
     "PerformanceConfig",
     "ComplianceConfig",

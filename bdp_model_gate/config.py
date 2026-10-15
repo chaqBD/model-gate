@@ -337,6 +337,85 @@ class ActuarialConfig:
 
 
 @dataclass
+class ComparisonConfig:
+    """How a challenger is judged against the champion it would replace.
+
+    Only consulted when `context.champion` is set. See
+    `bdp_model_gate.comparison` for the reasoning behind each default.
+
+    The decision rule is **non-inferiority**, read off a paired interval on
+    `Δ = challenger − champion`, signed so that positive always means the
+    challenger is better:
+
+    | Interval of Δ | Outcome | Flag |
+    |---|---|---|
+    | entirely above `min_improvement` | improved | `OK` |
+    | entirely above `−margin` | non-inferior | `OK`, or `CHALLENGER_NOT_BETTER` under `require="superior"` |
+    | straddles `−margin` | cannot tell | `UNCERTAIN` (`UncertaintyConfig.on_uncertain` applies) |
+    | entirely below `−margin` | worse | `CHALLENGER_WORSE`, blocking |
+    """
+
+    #: The metric the comparison is decided on. None (the default) means
+    #: `PerformanceConfig.metric`, so the comparison scores what the absolute
+    #: gate scores. Any value `PerformanceConfig.metric` accepts works here.
+    metric: MetricSetting | None = None
+    #: Absolute tolerance in the metric's own units. None (the default) means
+    #: `margin_relative` of the champion's score, which is unit-free: 0.01 is
+    #: meaningful for AUC and meaningless for RMSE on claim costs, and no
+    #: single absolute default is honest for both.
+    margin: float | None = None
+    #: The tolerance as a fraction of the champion's own score. 1% by default.
+    margin_relative: float = 0.01
+    #: How far above zero the interval must sit to call the challenger
+    #: *improved*. Zero means "measurably better at all".
+    min_improvement: float = 0.0
+    #: ``"non_inferior"`` (default): the challenger must not be materially
+    #: worse. Retraining on fresh data, a cheaper model, a simpler one or one
+    #: that drops a contested feature are all legitimate replacements that are
+    #: not measurably better, and requiring improvement would block each one.
+    #: ``"superior"``: the challenger must be measurably better, and a merely
+    #: non-inferior one is `CHALLENGER_NOT_BETTER`, blocking.
+    require: str = "non_inferior"
+    #: Secondary metrics that must not regress — `"brier"` or `"ece"` beside an
+    #: AUC, `"lorenz_gini"` on a pricing model, or any built-in metric name.
+    #: Each extra guardrail is another chance for noise to block a deploy, so
+    #: their intervals are Bonferroni-widened across the list, and they block
+    #: only on a clear regression.
+    #:
+    #: A list uses `margin_relative` of the champion's score on each. A dict
+    #: gives each its own **absolute** margin, `{"ece": 0.02}`, and that is the
+    #: right form for a calibration measure: a relative margin on an ECE of
+    #: 0.03 is 0.0003, far inside its sampling noise, so every comparison would
+    #: read UNCERTAIN.
+    guardrails: list[str] | dict[str, float] = field(default_factory=list)
+    #: Columns of `context.X` (or `protected_df`) to compare the two models
+    #: within, beside every protected attribute. An aggregate improvement
+    #: routinely hides a segment that got worse. Numeric columns with many
+    #: values are cut into quintiles.
+    segments: list[str] = field(default_factory=list)
+    #: A segment smaller than this is reported, not scored.
+    min_segment_size: int = 50
+    #: How much a disparity may *widen* — challenger minus champion, in the
+    #: statistic's own units — before `FairnessDeltaCheck` asks for a person.
+    max_disparity_increase: float = 0.02
+    #: Share of rows the champion got right and the challenger gets wrong.
+    #: Above this, `DecisionChurnCheck` asks for a person: a large break rate
+    #: under a small net gain is a model that is different, not better.
+    #: A starting point, not a standard: an ordinary retrain that gains a few
+    #: points of AUC typically breaks a few percent of decisions while fixing
+    #: more, and a default that fired on every one would teach people to ignore it.
+    max_break_rate: float = 0.10
+    #: Challenger p95 latency as a multiple of the champion's.
+    max_latency_ratio: float = 1.5
+    #: Challenger cost per inference as a multiple of the champion's.
+    max_cost_ratio: float = 1.5
+    #: Also run the absolute checks against the champion and report both
+    #: verdicts side by side. **Informational only — never affects the
+    #: status.** Off by default because it roughly doubles the run time.
+    gate_champion: bool = False
+
+
+@dataclass
 class SecurityConfig:
     adversarial_epsilon: float = 0.02
     adversarial_flip_rate_threshold: float = 0.05
@@ -440,3 +519,4 @@ class GateConfig:
     validation: ValidationConfig = field(default_factory=ValidationConfig)
     actuarial: ActuarialConfig = field(default_factory=ActuarialConfig)
     uncertainty: UncertaintyConfig = field(default_factory=UncertaintyConfig)
+    comparison: ComparisonConfig = field(default_factory=ComparisonConfig)

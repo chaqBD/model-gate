@@ -47,6 +47,42 @@ config.validation.max_split_overlap = 0.0  # zero tolerance
 config.validation.require_out_of_time_for_high_risk = False
 ```
 
+## Comparison
+
+Only consulted when `context.champion` is set. See
+[Replacing a model](../comparison.md).
+
+| Field | Default | Notes |
+|---|---|---|
+| `metric` | `None` | `None` means `performance.metric`, so the comparison scores what the gate scores |
+| `margin` | `None` | absolute tolerance in the metric's units; `None` means relative |
+| `margin_relative` | `0.01` | the tolerance as a fraction of the champion's score — unit-free |
+| `min_improvement` | `0.0` | how far above zero the interval must sit to count as *improved* |
+| `require` | `"non_inferior"` | or `"superior"`: a merely non-inferior challenger then blocks |
+| `guardrails` | `[]` | secondary metrics that must not regress; a dict gives each an absolute margin |
+| `segments` | `[]` | extra columns to compare within, beside every protected attribute |
+| `min_segment_size` | `50` | a smaller group is reported, not scored |
+| `max_disparity_increase` | `0.02` | how far a disparity may widen before a person looks |
+| `max_break_rate` | `0.10` | share of rows the champion got right and the challenger gets wrong |
+| `max_latency_ratio` | `1.5` | challenger p95 latency as a multiple of the champion's |
+| `max_cost_ratio` | `1.5` | the same, for cost per inference |
+| `gate_champion` | `False` | also run the absolute checks on the champion — informational only |
+
+`require="non_inferior"` is the default because retraining on fresh data, a
+cheaper model, a simpler one or one that drops a contested feature are all
+legitimate replacements that are not measurably better. Requiring improvement
+by default would block every one of them.
+
+```python
+config.comparison.require = "superior"  # a replacement must earn its risk
+config.comparison.guardrails = {"brier": 0.01, "ece": 0.02}  # absolute margins
+config.comparison.segments = ["channel", "vehicle_age"]
+```
+
+`gate_champion` is read from the `GateConfig` handed to `ModelGate`, so pass
+the config there as well as to the checks:
+`ModelGate(checks=default_structured_checks(config), config=config)`.
+
 ## Performance
 
 | Field | Default | Notes |

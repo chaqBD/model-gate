@@ -1,8 +1,8 @@
 # The checks
 
-Twenty-six built-in checks across five categories. Each declares a
+Thirty-three built-in checks across six categories. Each declares a
 **category**, whether it is **blocking**, and which **tasks** it supports.
-Fourteen also draw a chart — see [Plots](plots.md).
+Sixteen also draw a chart — see [Plots](plots.md).
 
 ## Validation — blocking
 
@@ -101,6 +101,122 @@ tables.
 differ a little — that is the point of one — so drift warrants a look rather
 than a hard stop, and a gate that fails the build on every seasonal shift gets
 switched off.
+
+## Comparison — the first three block
+
+**Only when a champion is supplied.** Every check here reports
+`NOT_APPLICABLE` without `context.champion`, and the challenger still runs
+every other check in the suite: the comparison is added on top, never instead.
+A challenger that beats a bad champion is still `BLOCKED` if it fails fairness
+or validation on its own terms. See [Replacing a model](../comparison.md) for
+the walkthrough.
+
+Both models are scored on the **same rows**, and every interval is on the
+*difference* between them, from one paired bootstrap. Δ is signed so that
+positive always means the challenger is better, whatever the metric's
+direction.
+
+| Check | Blocking | Flags |
+|---|---|---|
+| `comparison_integrity` | yes | `COMPARISON_INTEGRITY_RISK` |
+| `challenger_performance` | yes | `CHALLENGER_WORSE`, `CHALLENGER_NOT_BETTER`, `UNCERTAIN` |
+| `challenger_guardrails` | on a clear regression | `CHALLENGER_WORSE`, `UNCERTAIN` |
+| `subgroup_regression` | no | `SUBGROUP_WORSE`, `UNCERTAIN` |
+| `fairness_delta` | no | `FAIRNESS_WORSE`, `UNCERTAIN` |
+| `decision_churn` | no | `DECISION_CHURN`, `UNCERTAIN` |
+| `operational_delta` | no | `OPERATIONAL_COST_RISK` |
+
+All seven work on a **core install**, given a champion that can be called or
+its predictions.
+
+### `comparison_integrity`
+
+Can these two models be compared at all? Every trap it looks for produces a
+*confident* comparison rather than an error, which is why it blocks:
+
+- the two models were fitted on **different classes, or the same classes in a
+  different order** — a champion fitted on `"no"`/`"yes"` and a challenger on
+  `0`/`1` give an inverted comparison that reads as a large improvement;
+- the champion's scores **rank the outcome backwards** (AUC below 0.40 while
+  the challenger's is above 0.60) — the data-driven form of the same trap;
+- the champion predicts **labels that never occur** in `y_true`;
+- one model supplies **probabilities and the other labels**, under a ranking
+  metric — a ranking compared against a cut-off;
+- the champion **cannot score the rows** at all: a missing column, a wrong
+  length, a framework error.
+
+The champion's provenance — loader, file hash, whether the hash was pinned —
+is recorded on the result either way, so the report says *which* incumbent
+the challenger was measured against.
+
+### `challenger_performance`
+
+The headline comparison, on `ComparisonConfig.metric` — by default the
+performance gate's own metric, so the comparison and the absolute gate agree on
+what "good" means. Read by the non-inferiority rule:
+
+| Interval of Δ | Outcome | Flag |
+|---|---|---|
+| entirely above `min_improvement` | improved | `OK` |
+| entirely above `−margin` | non-inferior | `OK` — or `CHALLENGER_NOT_BETTER` under `require="superior"` |
+| straddles `−margin` | cannot tell | `UNCERTAIN`, and `on_uncertain` applies |
+| entirely below `−margin` | worse | `CHALLENGER_WORSE` |
+
+An improvement is reported as `OK` with `outcome: improved` in the metadata,
+not as a flag of its own: a non-OK flag routes to a human, and a better model
+should not.
+
+The default margin is **1% of the champion's score**, which is unit-free: an
+absolute 0.01 means something for AUC and nothing for RMSE on claim costs. A
+margin of zero is allowed and warned about — two equally good models straddle
+it by construction, so every like-for-like retrain reads `UNCERTAIN`.
+
+### `challenger_guardrails`
+
+Secondary metrics that must not get materially worse — a challenger can gain a
+point of AUC by wrecking its calibration. `ComparisonConfig.guardrails` names
+them: any built-in metric, plus `"brier"` and `"ece"` for binary probabilities.
+
+Each guardrail is another chance for noise to block a deploy, so the intervals
+are **Bonferroni-widened** across the list, and a guardrail blocks only on a
+clear regression — never for failing to improve. Give calibration measures an
+absolute margin with the dict form, `{"ece": 0.02}`: a relative margin on an
+ECE of 0.03 is 0.0003, far inside its sampling noise.
+
+### `subgroup_regression`
+
+Better on average, and worse for someone? Δ within every group of every
+protected attribute and every `ComparisonConfig.segments` column, with
+intervals Bonferroni-widened across all the groups scored. A numeric segment
+column is cut into quintiles. **Non-blocking**: whether a segment that got
+worse is acceptable depends on why. Draws every group's Δ against its margin.
+
+### `fairness_delta`
+
+Did a disparity **widen**? A challenger whose demographic-parity gap moves from
+0.02 to 0.09 passes an absolute threshold of 0.10 and has still become
+materially less fair than the model it replaces. Reports demographic parity
+(and, for binary, the equal-opportunity TPR gap; for regression, the relative
+group-mean gap) for both models, and flags a widening whose interval sits
+entirely above `max_disparity_increase`. Non-blocking.
+
+### `decision_churn`
+
+Classification only. Every changed decision is a **fix** (champion wrong,
+challenger right) or a **break** (the reverse). Breaks are the people for whom
+the "better" model is worse, and a large break rate under a small net gain is a
+model that is *different* rather than better. Each model is cut at its own
+operating threshold — `Champion(decision_threshold=...)`. Flags a break rate
+above `max_break_rate`. Draws the 2×2 of right and wrong. Regression's
+equivalent is [`prediction_dislocation`](#prediction_dislocation), which reads
+the champion's predictions automatically.
+
+### `operational_delta`
+
+p95 latency and cost per inference, challenger against champion, when both
+sides are measured. A one-point gain at four times the cost is a business
+decision, so this routes to a person. Point estimates: the two benchmarks are
+separate samples, not paired rows.
 
 ## Fairness — non-blocking
 
@@ -315,7 +431,8 @@ underneath it is not, so a model exposing no `predict_proba` reports
 
 ### `prediction_dislocation`
 
-Regression only, **non-blocking**, and needs `context.baseline_pred`.
+Regression only, **non-blocking**, and needs `context.baseline_pred` — or a
+`context.champion`, whose predictions it reads when no baseline is given.
 
 The question a pricing committee actually asks about a new model is not "is it
 more accurate?" — that is settled long before a gate. It is *"how many
@@ -335,8 +452,10 @@ particular profile is acceptable. The check's job is to put the number and the
 affected group in front of a person.
 
 Rows whose baseline is zero or negative are excluded and counted: a premium
-moving from 0 to 500 is not an increase of any percentage. Without a baseline
-the check reports `NOT_APPLICABLE` rather than treating the book mean as a
+moving from 0 to 500 is not an increase of any percentage. When both a
+`baseline_pred` and a champion are supplied, `baseline_pred` wins: it may be
+the premium actually charged, after adjustments the champion model never saw.
+Without either, the check reports `NOT_APPLICABLE` rather than treating the book mean as a
 stand-in, which would answer a different question.
 
 ## Security — blocking
