@@ -223,8 +223,10 @@ class ValidationConfig:
     # one column versus a small combination — differs, and the two checks
     # should agree on what counts as suspicious.
     #: Column-subset sizes CombinedFeatureLeakageCheck tests. (2,) by
-    #: default; adding 3 costs roughly `combined_leakage_max_features` times
-    #: as many fits as pairs do.
+    #: default. Adding 3 is not a flat multiple of the pair search — it is
+    #: C(n, 3) against C(n, 2) candidate columns, which grows faster: at the
+    #: default `combined_leakage_max_features` cap of 30, that is 4,060
+    #: triples against 435 pairs, roughly 9x, not 30x.
     combined_leakage_combo_sizes: tuple[int, ...] = (2,)
     #: Folds for the out-of-fold power estimate a combination is scored
     #: with — never in-sample, so a flag is not itself a smaller version of
@@ -239,6 +241,17 @@ class ValidationConfig:
     #: `leakage_ratio * model_power`) — keeps this check's findings disjoint
     #: from that one's.
     combined_leakage_skip_covered_features: bool = True
+    #: Above this many usable rows, the combination search (not the rest of
+    #: the check) runs on a `stable_sample` subsample of this size rather
+    #: than the full validation set — this is the cost that scales with
+    #: `combinations x folds`, so it is the one worth bounding. Content-
+    #: addressed, so the row order of the input still cannot move a verdict.
+    #: `individual_power` and candidate selection still see every row. At
+    #: 50,000 rows and 30 numeric columns, the default pair search drops
+    #: from about 25s to about 4s; the fixed per-combination cost, not row
+    #: count, is the larger remaining factor — see the PR discussion for a
+    #: sufficient-statistics optimisation that attacks that directly.
+    combined_leakage_max_rows: int = 10_000
 
 
 @dataclass

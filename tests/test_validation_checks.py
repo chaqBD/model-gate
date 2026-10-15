@@ -18,6 +18,7 @@ import pytest
 
 from bdp_model_gate import ModelGate, StructuredGateContext
 from bdp_model_gate.config import ComplianceConfig, ValidationConfig
+from bdp_model_gate.exceptions import GateConfigurationError
 from bdp_model_gate.stats import average_ranks, pearson_r, rank_auc
 from bdp_model_gate.structured.validation_checks import (
     CombinedFeatureLeakageCheck,
@@ -284,6 +285,115 @@ def test_combined_leakage_is_not_applicable_below_min_rows():
     y = np.array([0, 1, 0])
     (result,) = CombinedFeatureLeakageCheck().run(_context(X, y, y.astype(float)))
     assert result.flag == "NOT_APPLICABLE"
+
+
+def test_combined_leakage_is_non_blocking():
+    """Two columns matching the model's power is the normal shape of a
+    parsimonious, honest model, not only of a leak — see the next test. A
+    finding here is a judgement call, the same way FeatureDriftCheck's is,
+    so it routes to a human rather than blocking a model that may be doing
+    exactly what it should."""
+    assert CombinedFeatureLeakageCheck().blocking is False
+    X, y = _shipping_style_frame()
+    (result,) = CombinedFeatureLeakageCheck().run(_context(X, y, y.astype(float)))
+    assert result.blocking is False
+
+
+def test_a_clean_model_with_two_strong_real_features_still_reads_as_a_finding():
+    """Known limitation, not a bug: the check cannot distinguish 'these
+    columns define the label' from 'these columns are the real, honest
+    answer'. Built so the outcome has no leak at all — y_pred is the *true*
+    probability from a logistic model on two genuinely strong features, nothing
+    else. It still flags, which is exactly why the check is non-blocking
+    rather than tuned to somehow tell the two cases apart; that gap is
+    documented, not silently accepted."""
+    rng = np.random.default_rng(0)
+    n = 5000
+    income, debt = rng.normal(size=n), rng.normal(size=n)
+    other = rng.normal(size=(n, 6))
+    logit = 3.0 * income - 3.0 * debt + 0.3 * other[:, 0]
+    y = (rng.random(n) < 1 / (1 + np.exp(-logit))).astype(int)
+    p_true = 1 / (1 + np.exp(-logit))
+    X = pd.DataFrame(
+        np.column_stack([income, debt, other]),
+        columns=["income", "debt"] + [f"f{i}" for i in range(6)],
+    )
+    results = CombinedFeatureLeakageCheck().run(_context(X, y, p_true))
+    assert results[0].flag == "COMBINED_LEAKAGE_RISK"
+    assert results[0].blocking is False
+
+
+def test_combo_sizes_below_two_are_refused_at_construction():
+    with pytest.raises(GateConfigurationError):
+        CombinedFeatureLeakageCheck(ValidationConfig(combined_leakage_combo_sizes=(1, 2)))
+
+
+def test_datetime_columns_are_combined():
+    """The motivating leak shape, as it usually actually arrives: a
+    scheduled and a realised *timestamp*, not a pair of plain day-counts."""
+    rng = np.random.default_rng(7)
+    n = 2000
+    scheduled = pd.to_datetime(rng.integers(1, 30, n), unit="D", origin="2024-01-01")
+    offset_days = rng.choice([-1, 1], n) * rng.integers(1, 3, n)
+    real = scheduled + pd.to_timedelta(offset_days, unit="D")
+    late = (offset_days > 0).astype(int)
+    X = pd.DataFrame({"scheduled": scheduled, "real": real})
+    (result,) = CombinedFeatureLeakageCheck().run(_context(X, late, late.astype(float)))
+    assert result.flag == "COMBINED_LEAKAGE_RISK"
+    assert set(result.metadata["features"]) == {"scheduled", "real"}
+
+
+def test_unsigned_integer_columns_are_combined():
+    rng = np.random.default_rng(7)
+    n = 2000
+    # Kept well clear of zero so subtraction never needs a sign a uint can't hold.
+    scheduled = rng.integers(10, 30, n)
+    offset = rng.choice([-1, 1], n) * rng.integers(1, 3, n)
+    real = scheduled + offset
+    late = (offset > 0).astype(int)
+    X = pd.DataFrame({"scheduled": scheduled.astype("uint16"), "real": real.astype("uint16")})
+    (result,) = CombinedFeatureLeakageCheck().run(_context(X, late, late.astype(float)))
+    assert result.flag == "COMBINED_LEAKAGE_RISK"
+    assert set(result.metadata["features"]) == {"scheduled", "real"}
+
+
+def test_a_correlated_cluster_is_one_finding_not_one_per_pair():
+    """Eight noisy copies of one driver, paired against a second genuine
+    driver: every pair clears the bar, but it is one underlying finding, not
+    eight. The strongest pair is reported; the rest are folded into it."""
+    rng = np.random.default_rng(11)
+    n = 4000
+    driver = rng.normal(size=n)
+    other = rng.normal(size=n)
+    logit = 4.0 * driver + 4.0 * other
+    y = (rng.random(n) < 1 / (1 + np.exp(-logit))).astype(int)
+    p = 1 / (1 + np.exp(-logit))
+    cols = {"other": other}
+    for i in range(8):
+        cols[f"driver_copy_{i}"] = driver + rng.normal(scale=0.001, size=n)
+    X = pd.DataFrame(cols)
+
+    results = CombinedFeatureLeakageCheck().run(_context(X, y, p))
+    assert len(results) == 1
+    assert results[0].metadata["n_suppressed"] == 7
+    assert len(results[0].metadata["suppressed_combinations"]) == 5  # capped
+
+
+def test_the_combination_search_subsamples_large_frames_and_stays_order_invariant():
+    rng = np.random.default_rng(3)
+    n = 15_000
+    X, y = _shipping_style_frame(n=n, seed=3)
+    config = ValidationConfig(combined_leakage_max_rows=2_000)
+    (result,) = CombinedFeatureLeakageCheck(config).run(_context(X, y, y.astype(float)))
+    assert result.flag == "COMBINED_LEAKAGE_RISK"
+
+    order = rng.permutation(n)
+    X_shuffled = X.iloc[order].reset_index(drop=True)
+    y_shuffled = y[order]
+    (result_shuffled,) = CombinedFeatureLeakageCheck(config).run(
+        _context(X_shuffled, y_shuffled, y_shuffled.astype(float))
+    )
+    assert result_shuffled.metadata["combo_power"] == result.metadata["combo_power"]
 
 
 # --------------------------------------------------------------------------
