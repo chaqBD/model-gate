@@ -38,6 +38,7 @@ from bdp_model_gate.comparison import (
     resolve_comparison_metric,
 )
 from bdp_model_gate.exceptions import GateConfigurationError, GateValidationError
+from bdp_model_gate.stats import rank_auc
 from bdp_model_gate.structured import default_structured_checks
 from bdp_model_gate.structured.actuarial_checks import DislocationCheck
 from bdp_model_gate.structured.comparison_checks import (
@@ -51,6 +52,15 @@ from bdp_model_gate.structured.comparison_checks import (
     comparison_checks,
 )
 from bdp_model_gate.uncertainty import Interval
+
+
+def auc(y_true, y_score):
+    """ROC AUC without scikit-learn — `stats.rank_auc`, which
+    `tests/test_uncertainty.py` holds equal to `roc_auc_score`. Most of these
+    tests are about the comparison, not the metric, and must run on a core
+    install: there, naming `roc_auc` is a configuration error by design."""
+    return rank_auc(np.asarray(y_true), np.asarray(y_score, dtype=float))
+
 
 # --------------------------------------------------------------------------
 # Fixtures: scores whose quality is known by construction
@@ -177,7 +187,7 @@ def test_an_identical_champion_is_non_inferior_with_zero_delta(binary):
     X, y, good, _, _ = binary
     context = _context(X, y, good, Champion(predictions=good))
     result = _only(
-        ChallengerPerformanceCheck(performance=PerformanceConfig(metric="roc_auc")).run(context)
+        ChallengerPerformanceCheck(performance=PerformanceConfig(metric=auc)).run(context)
     )
 
     assert result.flag == "OK"
@@ -189,7 +199,7 @@ def test_an_identical_champion_is_non_inferior_with_zero_delta(binary):
 
 def test_a_better_challenger_is_improved_and_a_worse_one_blocks(binary):
     X, y, good, poor, _ = binary
-    performance = PerformanceConfig(metric="roc_auc", min_score=0.0)
+    performance = PerformanceConfig(metric=auc, min_score=0.0)
 
     better = _only(
         ChallengerPerformanceCheck(performance=performance).run(
@@ -215,7 +225,7 @@ def test_a_better_challenger_is_improved_and_a_worse_one_blocks(binary):
 def test_require_superior_blocks_a_merely_equal_challenger(binary):
     X, y, good, _, _ = binary
     check = ChallengerPerformanceCheck(
-        ComparisonConfig(require="superior"), PerformanceConfig(metric="roc_auc")
+        ComparisonConfig(require="superior"), PerformanceConfig(metric=auc)
     )
     result = _only(check.run(_context(X, y, good, Champion(predictions=good))))
     assert result.flag == NOT_BETTER_FLAG
@@ -244,7 +254,7 @@ def test_the_relative_margin_is_a_fraction_of_the_champions_score(binary):
     X, y, good, poor, _ = binary
     result = _only(
         ChallengerPerformanceCheck(
-            ComparisonConfig(margin_relative=0.05), PerformanceConfig(metric="roc_auc")
+            ComparisonConfig(margin_relative=0.05), PerformanceConfig(metric=auc)
         ).run(_context(X, y, good, Champion(predictions=poor)))
     )
     assert result.metadata["margin"] == pytest.approx(
@@ -254,7 +264,7 @@ def test_the_relative_margin_is_a_fraction_of_the_champions_score(binary):
 
     absolute = _only(
         ChallengerPerformanceCheck(
-            ComparisonConfig(margin=0.002), PerformanceConfig(metric="roc_auc")
+            ComparisonConfig(margin=0.002), PerformanceConfig(metric=auc)
         ).run(_context(X, y, good, Champion(predictions=poor)))
     )
     assert absolute.metadata["margin"] == 0.002
@@ -264,9 +274,9 @@ def test_the_relative_margin_is_a_fraction_of_the_champions_score(binary):
 def test_a_zero_margin_is_allowed_and_warned_about(binary, caplog):
     X, y, good, _, _ = binary
     with caplog.at_level("WARNING", logger="bdp_model_gate"):
-        ChallengerPerformanceCheck(
-            ComparisonConfig(margin=0.0), PerformanceConfig(metric="roc_auc")
-        ).run(_context(X, y, good, Champion(predictions=good)))
+        ChallengerPerformanceCheck(ComparisonConfig(margin=0.0), PerformanceConfig(metric=auc)).run(
+            _context(X, y, good, Champion(predictions=good))
+        )
     assert "margin is zero" in caplog.text
 
 
@@ -281,7 +291,7 @@ def test_swapping_the_models_negates_every_delta_and_swaps_fixes_with_breaks(bin
     only to within resampling noise: the resample order is derived from row
     *content*, and swapping which column holds which model changes it."""
     X, y, good, poor, _ = binary
-    performance = PerformanceConfig(metric="roc_auc")
+    performance = PerformanceConfig(metric=auc)
     forward = _context(X, y, good, Champion(predictions=poor))
     backward = _context(X, y, poor, Champion(predictions=good))
 
@@ -312,7 +322,7 @@ def test_row_order_does_not_move_the_comparison(binary):
             Champion(predictions=poor[rows]),
             protected_df=protected.iloc[rows].reset_index(drop=True),
         )
-        checks = comparison_checks(performance=PerformanceConfig(metric="roc_auc"))
+        checks = comparison_checks(performance=PerformanceConfig(metric=auc))
         return {
             (r.check_name, r.flag, r.metadata.get("ci_low")) for c in checks for r in c.run(context)
         }
@@ -329,7 +339,7 @@ def test_the_paired_interval_is_far_narrower_than_two_separate_ones(binary):
     slightly_worse = np.clip(good + rng.normal(scale=0.08, size=len(good)), 0.001, 0.999)
     context = _context(X, y, good, Champion(predictions=slightly_worse))
     compared_ = compared(context, 0.5)
-    metric = resolve_comparison_metric("roc_auc", "binary")
+    metric = resolve_comparison_metric(auc, "binary")
     statistic, _, _ = delta_statistic(metric, compared_)
     uncertainty = UncertaintyConfig(bootstrap_samples=400)
     frame = resampling_frame(compared_)
@@ -451,9 +461,7 @@ def test_a_challenger_better_overall_and_worse_for_one_group_routes_to_review(bi
     champion = np.where(south, champion, _scores(y, 2.5, np.random.default_rng(2)))
     context = _context(X, y, challenger, Champion(predictions=champion), protected_df=protected)
 
-    result = _only(
-        SubgroupRegressionCheck(performance=PerformanceConfig(metric="roc_auc")).run(context)
-    )
+    result = _only(SubgroupRegressionCheck(performance=PerformanceConfig(metric=auc)).run(context))
     assert result.flag == "SUBGROUP_WORSE"
     assert not result.blocking
     assert "south" in result.detail
@@ -465,7 +473,7 @@ def test_segments_can_be_feature_columns_and_numeric_ones_are_cut_into_quintiles
     X, y, good, poor, _ = binary
     result = _only(
         SubgroupRegressionCheck(
-            ComparisonConfig(segments=["a"]), PerformanceConfig(metric="roc_auc")
+            ComparisonConfig(segments=["a"]), PerformanceConfig(metric=auc)
         ).run(_context(X, y, good, Champion(predictions=poor)))
     )
     assert {g["group"] for g in result.metadata["groups"]} == {"Q1", "Q2", "Q3", "Q4", "Q5"}
@@ -572,7 +580,7 @@ def test_probabilities_against_labels_is_caught_for_a_ranking_metric(binary):
     context = _context(X, y, good, Champion(predictions=labels))
 
     ranking = _only(
-        ComparisonIntegrityCheck(performance=PerformanceConfig(metric="roc_auc")).run(context)
+        ComparisonIntegrityCheck(performance=PerformanceConfig(metric=auc)).run(context)
     )
     assert ranking.flag == "COMPARISON_INTEGRITY_RISK"
     assert "ranking against a cut-off" in ranking.detail
@@ -922,14 +930,14 @@ def test_a_champion_needs_exactly_one_source_and_a_sane_threshold(kwargs):
 
 def test_the_report_leads_with_the_comparison(binary):
     X, y, good, poor, protected = binary
-    config = GateConfig(performance=PerformanceConfig(metric="roc_auc", min_score=0.0))
+    config = GateConfig(performance=PerformanceConfig(metric=auc, min_score=0.0))
     report = ModelGate(checks=default_structured_checks(config, include_plugins=False)).run(
         _context(X, y, good, Champion(predictions=poor), protected_df=protected)
     )
     summary = report.comparison
     assert summary["outcome"] == IMPROVED
     assert summary["champion"]["source"] == "predictions"
-    assert "vs champion: roc_auc" in report.summary()
+    assert "vs champion: auc" in report.summary()
     payload = json.loads(report.to_json())
     assert payload["comparison"]["delta"] == summary["delta"]
     assert list(payload["results_by_category"])[:2] == ["validation", "comparison"]
@@ -945,7 +953,7 @@ def test_without_a_champion_the_report_carries_no_comparison(small_valid_context
 def test_the_html_report_draws_the_comparison(binary):
     pytest.importorskip("matplotlib")
     X, y, good, poor, protected = binary
-    config = GateConfig(performance=PerformanceConfig(metric="roc_auc", min_score=0.0))
+    config = GateConfig(performance=PerformanceConfig(metric=auc, min_score=0.0))
     report = ModelGate(checks=default_structured_checks(config, include_plugins=False)).run(
         _context(X, y, good, Champion(predictions=poor), protected_df=protected)
     )
@@ -1012,7 +1020,7 @@ def test_multiclass_compares_labels_and_probability_matrices():
     X = pd.DataFrame({"x": rng.normal(size=n)})
     good = np.where(rng.uniform(size=n) < 0.8, y, rng.choice(classes, n))
     poor = np.where(rng.uniform(size=n) < 0.5, y, rng.choice(classes, n))
-    performance = PerformanceConfig(metric="balanced_accuracy")
+    performance = PerformanceConfig(metric="accuracy")
     context = _context(
         X, y, good, Champion(predictions=poor), task="multiclass", class_order=classes
     )
