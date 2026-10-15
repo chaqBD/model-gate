@@ -25,18 +25,18 @@ report = ModelGate().run(context)
 print(report.summary())
 ```
 
+An excerpt of the summary from [notebook 09](examples/09_champion_challenger.ipynb):
+
 ```text
-Gate status: NEEDS_REVIEW (3120ms, binary)
-  roc_auc: 0.8396
-  vs champion: roc_auc 0.8396 against 0.8063, Δ +0.0333 [+0.0182, +0.0477] -> improved
+  roc_auc: 0.7304
+  vs champion: roc_auc 0.7304 against 0.6517, Δ +0.0786 [+0.0614, +0.0955] -> improved
   validation: 0 flag(s)
   comparison: 2 flag(s)
-  ...
 ```
 
-Here the challenger is measurably better — and the two comparison findings,
-both non-blocking, are a calibration guardrail and a fairness gap that might
-have widened. Better on the headline metric is where the review starts.
+The challenger is measurably better — and the two comparison findings, both
+non-blocking, are fairness intervals that cannot rule out a small widening.
+Better on the headline metric is where the review starts.
 
 Exit codes and `gate_status` do not change. The comparison adds results — it
 does not add a new kind of verdict.
