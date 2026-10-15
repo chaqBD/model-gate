@@ -98,6 +98,8 @@ class ModelGate:
 
         metric, score = self._headline_score(results)
         report = GateReport(results=results, model_metric=metric, model_score=score, task=task)
+        if getattr(context, "champion", None) is not None and self.config.comparison.gate_champion:
+            report.champion_report, report.champion_report_note = self._gate_champion(context)
         # Handed to the report so `to_html()` can ask each check to draw
         # itself. Deliberately not part of the serialised record — see the
         # field comments on GateReport.
@@ -112,6 +114,44 @@ class ModelGate:
             score,
         )
         return report
+
+    def _gate_champion(self, context) -> tuple[GateReport | None, str | None]:
+        """The absolute checks, run against the champion. Never affects status.
+
+        Only a champion that can be called is gated: one supplied as
+        predictions cannot be perturbed, explained or re-scored, so half the
+        suite could not run against it and the verdict would mislead.
+        """
+        from dataclasses import replace
+
+        from ..comparison import compared
+        from ..exceptions import BDPModelGateError
+
+        champion = context.champion
+        if champion.predictions_only:
+            return None, "the champion was supplied as predictions, so it cannot be re-gated"
+        try:
+            scored = compared(context, self.config.performance.decision_threshold)
+            champion_context = replace(
+                context,
+                model=champion.model,
+                predict_fn=champion.predict_fn,
+                predict_proba_fn=champion.predict_proba_fn,
+                gradient_fn=None,
+                X=champion.frame_for(context.X),
+                y_pred=scored.champion,
+                champion=None,
+                baseline_pred=None,
+                latencies_ms=champion.latencies_ms,
+                cost_per_inference=champion.cost_per_inference,
+            )
+            checks = [c for c in self.checks if getattr(c, "category", None) != "comparison"]
+            report = ModelGate(checks=checks, config=self.config).run(champion_context)
+        except BDPModelGateError as exc:
+            logger.warning("could not gate the champion: %s", exc)
+            return None, f"could not gate the champion: {exc}"
+        logger.info("champion's own gate (informational): %s", report.gate_status)
+        return report, None
 
     @staticmethod
     def _validate(context) -> None:

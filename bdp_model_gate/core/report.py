@@ -35,6 +35,15 @@ class GateReport:
     _checks: Any = field(default=None, init=False, repr=False, compare=False)
     _context: Any = field(default=None, init=False, repr=False, compare=False)
 
+    #: The absolute checks run against the champion, when
+    #: `ComparisonConfig.gate_champion` is on. **Informational only** — it
+    #: never affects `gate_status`. Its point is the finding "the incumbent
+    #: would itself be BLOCKED today", which belongs in front of anyone arguing
+    #: the challenger is too risky to replace it.
+    champion_report: GateReport | None = field(default=None, repr=False, compare=False)
+    #: Why the champion was not gated, when it was asked for and could not be.
+    champion_report_note: str | None = field(default=None, repr=False, compare=False)
+
     @property
     def model_auc(self) -> float | None:
         """Deprecated. Returns `model_score` only when the configured
@@ -56,6 +65,53 @@ class GateReport:
 
     def by_category(self, category: str) -> list[CheckResult]:
         return [r for r in self.results if r.category == category]
+
+    @property
+    def comparison(self) -> dict[str, Any] | None:
+        """The champion-versus-challenger summary, or None without a champion.
+
+        Lifted from the comparison checks' own results rather than recomputed,
+        so the summary and the findings beside it cannot disagree.
+        """
+        rows = [r for r in self.by_category("comparison") if r.flag != "NOT_APPLICABLE"]
+        if not rows:
+            return None
+        summary: dict[str, Any] = {}
+        for r in rows:
+            if r.check_name == "comparison_integrity":
+                summary["champion"] = r.metadata.get("champion")
+                summary["integrity"] = r.flag
+            elif r.check_name == "challenger_performance":
+                keys = (
+                    "metric",
+                    "challenger_score",
+                    "champion_score",
+                    "delta",
+                    "ci_low",
+                    "ci_high",
+                    "ci_level",
+                    "margin",
+                    "margin_is_relative",
+                    "require",
+                    "outcome",
+                )
+                summary.update({k: r.metadata[k] for k in keys if k in r.metadata})
+                summary["flag"] = r.flag
+        summary["findings"] = [
+            {"check_name": r.check_name, "flag": r.flag, "blocking": r.blocking}
+            for r in rows
+            if not r.is_ok
+        ]
+        if self.champion_report is not None:
+            summary["champion_gate"] = {
+                "gate_status": self.champion_report.gate_status,
+                "findings": [
+                    {"check_name": r.check_name, "flag": r.flag} for r in self.champion_report.flags
+                ],
+            }
+        elif self.champion_report_note:
+            summary["champion_gate"] = {"gate_status": None, "note": self.champion_report_note}
+        return summary
 
     @property
     def gate_status(self) -> str:
@@ -95,6 +151,7 @@ class GateReport:
             "model_auc": self.model_score if self.model_metric == "roc_auc" else None,
             "n_flags": len(self.flags),
             "total_duration_ms": self.total_duration_ms,
+            **({"comparison": self.comparison} if self.comparison is not None else {}),
             "results_by_category": by_cat,
         }
 
@@ -144,9 +201,30 @@ class GateReport:
         lines = [f"Gate status: {self.gate_status} ({self.total_duration_ms:.0f}ms{task_note})"]
         if self.model_metric is not None and self.model_score is not None:
             lines.append(f"  {self.model_metric}: {self.model_score:.4f}")
+        comparison = self.comparison
+        if comparison is not None and "delta" in comparison:
+            interval = (
+                f" [{comparison['ci_low']:+.4f}, {comparison['ci_high']:+.4f}]"
+                if "ci_low" in comparison
+                else ""
+            )
+            lines.append(
+                f"  vs champion: {comparison['metric']} {comparison['challenger_score']:.4f} "
+                f"against {comparison['champion_score']:.4f}, "
+                f"Δ {comparison['delta']:+.4f}{interval} -> {comparison['outcome']}"
+            )
+        if self.champion_report is not None:
+            lines.append(
+                f"  champion's own gate (informational): {self.champion_report.gate_status}"
+            )
         # Validation leads: a finding there means the numbers below it were
-        # measured on evidence that does not support them.
-        for category in ("validation", "performance", "compliance", "security", "fairness"):
+        # measured on evidence that does not support them. The comparison
+        # follows when there is a champion, since it is the first question a
+        # reviewer of a replacement asks.
+        categories = ["validation", "performance", "compliance", "security", "fairness"]
+        if comparison is not None:
+            categories.insert(1, "comparison")
+        for category in categories:
             cat_flags = [r for r in self.by_category(category) if not r.is_ok]
             lines.append(f"  {category}: {len(cat_flags)} flag(s)")
         return "\n".join(lines)

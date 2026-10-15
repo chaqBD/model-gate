@@ -104,6 +104,7 @@ nav:
       - Regression: tasks/regression.md
       - Insurance pricing: tasks/insurance.md
   - Any model: models.md
+  - Replacing a model: comparison.md
   - Generative side-cars: security.md
   - Reference:
       - The checks: reference/checks.md
@@ -123,3 +124,4 @@ nav:
       - 06 Reports and plots: examples/06_reports_and_plots.ipynb
       - 07 Insurance pricing: examples/07_insurance_pricing_end_to_end.ipynb
       - 08 Generative side-cars: examples/08_generative_side_car.ipynb
+      - 09 Champion and challenger: examples/09_champion_challenger.ipynb

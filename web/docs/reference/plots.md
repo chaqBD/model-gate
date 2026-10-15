@@ -1,6 +1,6 @@
 # Plots
 
-We are not replacing your plotting library. Fourteen checks draw a chart, and
+We are not replacing your plotting library. Sixteen checks draw a chart, and
 each one exists because a scalar loses something a reviewer needs.
 
 ```bash
@@ -61,6 +61,8 @@ matrix is four numbers the detail line already carries.
 | Lorenz curve | `risk_discrimination` | a Gini earned on one dreadful decile and one spread across the book are the same number |
 | Partial dependence | `monotonicity` | "not monotone" does not say whether the curve dips once or sags through the middle |
 | Change histogram | `prediction_dislocation` | a tight bump past the threshold is a rounding decision; a long tail is a conduct problem |
+| Group Δ forest | `subgroup_regression` | an aggregate improvement hides a segment that got worse |
+| Fixes and breaks | `decision_churn` | a net gain hides how many decisions it broke |
 | Injection bars | `prompt_injection` | *which* attack family, and on *which* surface — the finding a single score erases |
 
 Six deserve a longer note.

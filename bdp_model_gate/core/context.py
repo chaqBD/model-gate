@@ -4,9 +4,12 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 import pandas as pd
+
+if TYPE_CHECKING:
+    from ..champion import Champion
 
 
 @dataclass
@@ -83,7 +86,15 @@ class StructuredGateContext:
             model being replaced, or last quarter's version of this one.
             Enables `DislocationCheck`, which answers the question a conduct
             review actually asks: not "is the new model better?" but "how
-            many policyholders see a rise above 25%, and which ones?".
+            many policyholders see a rise above 25%, and which ones?". When
+            it is omitted and `champion` is set, the champion's predictions
+            are used instead.
+        champion: The model this one would replace — see
+            `bdp_model_gate.champion.Champion`. Enables the comparison checks,
+            which score both models on the same rows and ask whether the
+            challenger is at least as good, for whom it is worse, and how
+            many decisions change. The challenger still runs the full gate;
+            the comparison is added on top.
         predict_fn: `fn(DataFrame) -> array` returning point predictions.
             Takes precedence over `model`. The boundary is deliberately
             "DataFrame in, array out": your function owns tensor conversion,
@@ -145,6 +156,7 @@ class StructuredGateContext:
     expected_loss: Sequence[float] | None = None
     exposure: Sequence[float] | None = None
     baseline_pred: Sequence[float] | None = None
+    champion: Champion | None = None
     predict_fn: Callable[[pd.DataFrame], Any] | None = None
     predict_proba_fn: Callable[[pd.DataFrame], Any] | None = None
     gradient_fn: Callable[[pd.DataFrame], Any] | None = None

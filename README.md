@@ -7,8 +7,9 @@
 **📖 [Documentation](https://vanjy-eng.github.io/model-gate/)** — guide, API reference and runnable examples.
 
 Automated pre-deployment ML model governance: fairness, performance,
-compliance, security and validation-methodology checks, run as a single
-gate that gives you a
+compliance, security and validation-methodology checks — and, for a
+replacement, a comparison against the model already in production — run as
+a single gate that gives you a
 `PASS` / `NEEDS_REVIEW` / `BLOCKED` status to wire into CI before a model
 is promoted to production.
 
@@ -106,6 +107,20 @@ it was measured on data the model had memorised. A performance finding says
 the model is not good enough; a validation finding says you do not yet know
 whether it is, which is a prior question — so these block, and lead the
 report.
+
+**Comparison** (only with a champion; the first three block)
+- `ComparisonIntegrityCheck` — can the two models be compared at all? A
+  champion whose label encoding is inverted reads as a huge improvement, so
+  this blocks
+- `ChallengerPerformanceCheck` — is the challenger at least as good as the
+  model it replaces, on a paired interval of the difference?
+- `ChallengerGuardrailCheck` — did a secondary metric, such as Brier, regress?
+- `SubgroupRegressionCheck` — better on average, and worse for someone?
+- `FairnessDeltaCheck` — did a disparity widen, even inside its absolute limit?
+- `DecisionChurnCheck` — how many decisions change, split into fixes and breaks
+- `OperationalDeltaCheck` — slower or dearer to run than the champion?
+
+See [Replacing a model](#replacing-a-model).
 
 **Actuarial — pricing** (blocking, except dislocation)
 - `ActualVsExpectedCheck` — did the book collect what it needed to? The level,
@@ -214,6 +229,53 @@ about it are different things. Two things to expect: small validation sets see
 `UNCERTAIN` a lot (below ~500 rows a 0.10 disparity threshold is inside the
 noise floor whatever the model does), and a threshold with no headroom will
 too. See [How sure is it?](https://vanjy-eng.github.io/model-gate/docs/concepts/#how-sure-is-it).
+
+## Replacing a model
+
+The gate asks *is this model good enough?* A replacement raises a second
+question that governance usually cares about more: **is it better than the
+model already in production, and better for whom?** Hand the gate the
+champion and it scores both models on the same rows:
+
+```python
+from bdp_model_gate import Champion
+
+context = StructuredGateContext(
+    model=challenger,
+    X=X_val,
+    y_true=y_val,
+    y_pred=y_pred,
+    protected_df=protected_val,
+    champion=Champion.from_file("models/scorecard_v3.joblib", sha256="9f2c…"),
+)
+report = ModelGate().run(context)
+# vs champion: roc_auc 0.7304 against 0.6517, Δ +0.0786 [+0.0614, +0.0955] -> improved
+```
+
+- **The challenger still runs the full gate.** The comparison is added on top;
+  "better than what we had" is never a pass by itself.
+- **One interval, on the difference.** A paired bootstrap scores both models on
+  each resample. Checking whether two separate intervals overlap would call a
+  real improvement a draw, because the two models' errors are correlated.
+- **Non-inferior by default.** The challenger must not be materially worse
+  (by default, 1% of the champion's score). Set `require="superior"` if a
+  replacement must be measurably better.
+- **Any format the champion is saved in.** `.joblib`/`.pkl`, `.skops`,
+  `.onnx` and `.keras` load by extension. PyTorch goes through
+  `Champion.from_loader("pkg.module:factory")`, because a `.pt` file needs code
+  this library cannot guess. A champion that will not load in this environment
+  can be supplied as `Champion(predictions=...)`, scored in its own.
+- **The traps fail loudly.** A version warning while unpickling is an error, a
+  pinned `sha256` is checked before anything is deserialised, and an inverted
+  or mismatched label encoding blocks.
+
+```bash
+bdp-model-gate --model v4.joblib --champion v3.joblib --champion-sha256 9f2c… \
+  --data validation.csv --target-col label --output gate_report.json
+```
+
+See [Replacing a model](https://vanjy-eng.github.io/model-gate/docs/comparison/)
+and [notebook 09](examples/09_champion_challenger.ipynb).
 
 ## Customizing thresholds
 
@@ -742,6 +804,8 @@ See [`ROADMAP.md`](ROADMAP.md) for the detail and the decisions behind each.
 | Release | Theme |
 |---|---|
 | **0.7.0** | Champion vs challenger — compare a proposed model against the one in production, with blocking and non-blocking outcomes. |
+| **0.7.1** | Fix: exposure-weighted performance intervals pair each row with another row's weight. |
+| **0.7.2** | Fix: multiclass probability matrices are read in `class_order` rather than the model's column order. |
 | **0.8.0** | Release automation — publish on tag via Trusted Publishing, PyPI behind a required reviewer. |
 | **1.0.0** | A public, subclassable `ModelAdapter`. |
 | Later | Unstructured data (text/image/audio). |
@@ -770,7 +834,7 @@ shapes most of the conventions, and `CONTRIBUTING.md` explains them.
 
 ## Examples
 
-Eight runnable notebooks live in [`examples/`](examples/), committed with
+Nine runnable notebooks live in [`examples/`](examples/), committed with
 outputs so they read without being run:
 
 | Notebook | Covers |
@@ -783,5 +847,6 @@ outputs so they read without being run:
 | [06 reports and plots](examples/06_reports_and_plots.ipynb) | the fourteen charts, and the HTML report |
 | [07 insurance pricing](examples/07_insurance_pricing_end_to_end.ipynb) | exposure, A/E, the Gini, monotonicity and dislocation on one motor book |
 | [08 generative side-cars](examples/08_generative_side_car.ipynb) | prompt injection on both surfaces, and a canary leak caught |
+| [09 champion and challenger](examples/09_champion_challenger.ipynb) | replacing a scorecard: better overall, worse for one channel, and the loading traps |
 
 See [`CHANGELOG.md`](https://github.com/vanjy-eng/model-gate/blob/main/CHANGELOG.md) for release history.

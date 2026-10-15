@@ -1,6 +1,6 @@
 # Examples
 
-Eight notebooks, each executed and committed with outputs. None needs external
+Nine notebooks, each executed and committed with outputs. None needs external
 data or credentials.
 
 | Notebook | Task | Domain | Model |
@@ -13,6 +13,7 @@ data or credentials.
 | [06 Reports and plots](06_reports_and_plots.ipynb) | all three | credit, pricing, underwriting | `LogisticRegression`, plain functions |
 | [07 Insurance pricing](07_insurance_pricing_end_to_end.ipynb) | regression, exposure | motor tariff end to end | `GradientBoostingRegressor` + business rules |
 | [08 Generative side-cars](08_generative_side_car.ipynb) | binary + a side-car | claims explanation assistant | a scripted LLM stand-in |
+| [09 Champion and challenger](09_champion_challenger.ipynb) | binary | replacing a credit scorecard | `LogisticRegression` → `HistGradientBoostingClassifier` |
 
 **Start with 01.** It covers the core machinery — contexts, checks, reports,
 verdicts, configuration, custom checks, plugins, validation and the CLI. The
@@ -33,6 +34,10 @@ than for refusal, both surfaces, and a canary leak caught. No network and no
 credentials: the side-car is a scripted stand-in. See
 [Generative side-cars](../security.md).
 
+**09 is the replacement case** — a challenger that beats the champion on AUC
+and is clearly worse for one channel, then the traps that make a comparison
+confidently wrong. See [Replacing a model](../comparison.md).
+
 ## Running them
 
 ```bash
@@ -42,7 +47,7 @@ jupyter lab examples/
 
 01–03 need nothing more. 04 needs `torch`; 05 needs `xgboost` (and
 `brew install libomp` on macOS, which XGBoost requires there regardless);
-06, 07 and 08 need the [`[plots]` extra](../reference/plots.md).
+06, 07, 08 and 09 need the [`[plots]` extra](../reference/plots.md).
 
 !!! note "Why PyTorch and XGBoost are in separate notebooks"
     On macOS the two link different OpenMP runtimes and **segfault in the same

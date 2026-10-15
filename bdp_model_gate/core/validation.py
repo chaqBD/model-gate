@@ -43,6 +43,7 @@ def validate_structured_context(context: StructuredGateContext) -> None:
     _validate_expected_loss(context)
     _validate_exposure(context)
     _validate_baseline_pred(context)
+    _validate_champion(context)
     _validate_protected_df(context)
     _validate_model_card(context)
     _validate_performance_inputs(context)
@@ -233,6 +234,29 @@ def _validate_baseline_pred(context: StructuredGateContext) -> None:
         raise GateValidationError(
             "context.baseline_pred contains NaN or infinite values, so the relative "
             "change against it is undefined"
+        )
+
+
+def _validate_champion(context: StructuredGateContext) -> None:
+    champion = getattr(context, "champion", None)
+    if champion is None:
+        return
+    from ..champion import Champion
+
+    if not isinstance(champion, Champion):
+        raise GateValidationError(
+            f"context.champion must be a Champion, got {type(champion).__name__} — wrap it: "
+            "Champion(model=...), Champion.from_file(path) or Champion(predictions=...)"
+        )
+    if champion.predictions is not None and len(champion.predictions) != len(context.X):
+        raise GateValidationError(
+            f"the champion's predictions have length {len(champion.predictions)}, but "
+            f"context.X has {len(context.X)} rows — they must be row-aligned"
+        )
+    if context.y_true is None or context.y_pred is None:
+        raise GateValidationError(
+            "context.champion is set but y_true/y_pred are not — a comparison scores both "
+            "models against the same labels, so it cannot run without them"
         )
 
 

@@ -66,6 +66,29 @@ def load_scorer():
 | `--inject-loader "pkg.mod:factory"` | a factory returning `fn(payload) -> str` — the indirect surface, where retrieved content goes |
 | `--canaries-file PATH` | strings that must never appear in generated output, one per line |
 
+### Champion
+
+| Flag | Notes |
+|---|---|
+| `--champion PATH` | the model this one would replace: `.joblib`/`.pkl`, `.skops`, `.onnx` or `.keras`/`.h5` |
+| `--champion-loader "pkg.mod:factory"` | a factory returning the champion — PyTorch, a SavedModel, a registry |
+| `--champion-col NAME` | column of `--data` holding the champion's predictions, in the same form as the challenger's; dropped from `X` |
+| `--champion-sha256 HEX` | pins the `--champion` file; checked **before** loading, and a mismatch exits 1 |
+| `--champion-features a,b,c` | the columns the champion was fitted on, when the model does not record them |
+| `--champion-decision-threshold FLOAT` | the cut-off the champion is operated at, if it differs |
+
+The three sources are mutually exclusive. Any of them adds the
+[comparison checks](checks.md#comparison-the-first-three-block); without one
+they report `NOT_APPLICABLE`. `--baseline-col` is unchanged and is not an alias:
+it feeds only the dislocation check, so an existing pipeline that passes it does
+not suddenly start gating on a comparison it never asked for.
+
+```bash
+bdp-model-gate --model scorecard_v4.joblib \
+  --champion scorecard_v3.joblib --champion-sha256 9f2c… \
+  --data validation.csv --target-col label --output gate_report.json
+```
+
 The three column flags name columns of `--data` that are **not** features, and
 each is read out and then dropped from `X`. Leaving last quarter's premium in
 the feature frame would hand the model its own answer, which is the leak

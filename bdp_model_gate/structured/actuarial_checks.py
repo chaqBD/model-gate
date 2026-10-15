@@ -726,10 +726,11 @@ class DislocationCheck(BaseCheck):
     particular?". A model can be better on every statistical measure and
     still be undeployable because of who it re-prices.
 
-    Needs `context.baseline_pred`: the incumbent's prediction for the same
-    rows, or last quarter's version of this model. Without it there is
-    nothing to be a change *from*, and the check reports NOT_APPLICABLE
-    rather than treating the mean as a baseline.
+    Needs `context.baseline_pred` — the incumbent's prediction for the same
+    rows, or last quarter's version of this model — or a `context.champion`,
+    whose predictions are used when `baseline_pred` is absent. Without either
+    there is nothing to be a change *from*, and the check reports
+    NOT_APPLICABLE rather than treating the mean as a baseline.
 
     **Non-blocking, and deliberately.** A dislocated book may be entirely
     correct — that is often the point of a re-rate — and no threshold can
@@ -749,11 +750,32 @@ class DislocationCheck(BaseCheck):
     def __init__(self, config: ActuarialConfig | None = None):
         self.config = config or ActuarialConfig()
 
+    @staticmethod
+    def _baseline(context) -> tuple[np.ndarray | None, str]:
+        """The incumbent's prices, and where they came from.
+
+        `baseline_pred` wins when both are supplied: it may be the premium
+        actually charged, after adjustments the champion model never saw.
+        """
+        if getattr(context, "baseline_pred", None) is not None:
+            return np.asarray(context.baseline_pred, dtype=float), "baseline_pred"
+        if getattr(context, "champion", None) is None or context.y_pred is None:
+            return None, ""
+        from ..comparison import compared
+        from ..exceptions import GateConfigurationError
+
+        try:
+            scored = compared(context, 0.5)
+        except GateConfigurationError:
+            return None, ""
+        return scored.champion.astype(float), "champion"
+
     def _change(self, context) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
         """`(relative change, defined mask, weights)`, or None if unusable."""
-        if getattr(context, "baseline_pred", None) is None or context.y_pred is None:
+        baseline, _ = self._baseline(context)
+        if baseline is None or context.y_pred is None:
             return None
-        change, defined = relative_change(context.y_pred, context.baseline_pred)
+        change, defined = relative_change(context.y_pred, baseline)
         if not defined.any():
             return None
         weights = weights_or_ones(exposure_array(context), len(change))
@@ -762,11 +784,12 @@ class DislocationCheck(BaseCheck):
     def run(self, context) -> list[CheckResult]:
         if context.y_pred is None:
             return _not_applicable(self, "no y_pred — there is no new price to compare")
-        if getattr(context, "baseline_pred", None) is None:
+        baseline, source = self._baseline(context)
+        if baseline is None:
             return _not_applicable(
                 self,
-                "no baseline_pred supplied — dislocation is measured against the "
-                "incumbent's price for the same rows (the model being replaced, or the "
+                "no baseline_pred or champion supplied — dislocation is measured against "
+                "the incumbent's price for the same rows (the model being replaced, or the "
                 "previous version of this one). There is no sensible stand-in: comparing "
                 "against the book mean would answer a different question",
             )
@@ -775,7 +798,7 @@ class DislocationCheck(BaseCheck):
         if prepared is None:
             return _not_applicable(
                 self,
-                "every baseline_pred value is zero or negative, so no relative change is "
+                "every baseline value is zero or negative, so no relative change is "
                 "defined — a price moving from zero is not an increase of any percentage",
             )
         change, defined, weights = prepared
@@ -823,6 +846,7 @@ class DislocationCheck(BaseCheck):
                     "n_rows_excluded": n_excluded,
                     "exposure_weighted": bool(weighted),
                     "rise_share_by_group": group_shares,
+                    "baseline_source": source,
                 },
             )
         ]

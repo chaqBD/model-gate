@@ -502,7 +502,8 @@
     <span class="eyebrow">Pre-deployment ML governance</span>
     <h1>Every model gets a verdict before it ships.</h1>
     <p class="lede">
-      Validation, fairness, performance, compliance and security checks that run
+      Validation, fairness, performance, compliance and security checks — and a
+      comparison against the model already in production — that run
       <strong>after training and before promotion</strong> — reduced to one
       status your pipeline can branch on. Built for decisions that answer to
       someone: credit scoring, underwriting, pricing and claims.
@@ -619,7 +620,7 @@
   </section>
 
   <section class="wrap divider" id="checks">
-    <span class="eyebrow">Twenty-six checks, five categories</span>
+    <span class="eyebrow">Thirty-three checks, six categories</span>
     <h2 style="font-size:clamp(1.5rem,3vw,2rem);margin-top:.6rem;">What gets checked</h2>
     <p class="prose" style="margin-top:.9rem;">
       Optional inputs degrade rather than fail — omit protected attributes and
@@ -639,6 +640,22 @@
           <li><code>validation_strategy</code> — out-of-time holdout, or a random split?</li>
           <li><code>feature_contract</code> — the right columns, in the right order</li>
           <li><code>feature_drift</code> — does validation still look like training?</li>
+        </ul>
+      </article>
+
+      <article class="check">
+        <div class="check-top">
+          <h3>Comparison</h3>
+          <span class="tag blocking">Blocking</span>
+        </div>
+        <ul>
+          <li><code>comparison_integrity</code> — can the two models be compared at all?</li>
+          <li><code>challenger_performance</code> — at least as good as the model it replaces?</li>
+          <li><code>challenger_guardrails</code> — did a secondary metric regress?</li>
+          <li><code>subgroup_regression</code> — better on average, and worse for someone? <em>(review)</em></li>
+          <li><code>fairness_delta</code> — did a disparity widen? <em>(review)</em></li>
+          <li><code>decision_churn</code> — fixes against breaks <em>(review)</em></li>
+          <li><code>operational_delta</code> — slower or dearer to run? <em>(review)</em></li>
         </ul>
       </article>
 

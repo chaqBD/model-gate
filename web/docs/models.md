@@ -115,3 +115,12 @@ than sampling a black box.
 
 See [notebook 04](examples/04_any_framework_classification.ipynb) and
 [notebook 05](examples/05_boosters_and_cli.ipynb).
+
+## The model you are replacing
+
+The same rules apply to a champion. `Champion(model=...)` and
+`Champion(predict_fn=...)` take exactly what the context takes, and
+`Champion.from_file` loads joblib, pickle, `.skops`, `.onnx` and `.keras` files
+by extension — but refuses a `.pt` checkpoint, for the reason this page opens
+with: turning a DataFrame into a tensor is your decision, not a guess this
+library should make. See [Replacing a model](comparison.md#supplying-the-champion).

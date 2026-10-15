@@ -332,6 +332,49 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "than the tolerance, and which group carries it"
         ),
     )
+    champion_source = parser.add_mutually_exclusive_group()
+    champion_source.add_argument(
+        "--champion",
+        help=(
+            "The model this one would replace, as a file: .joblib/.pkl, .skops, .onnx or "
+            ".keras/.h5, loaded by extension. Enables the comparison checks — both models "
+            "are scored on the same rows, and a challenger that is materially worse blocks"
+        ),
+    )
+    champion_source.add_argument(
+        "--champion-loader",
+        help=(
+            "A 'package.module:factory' returning the champion — a model or a "
+            "fn(DataFrame) -> array. For PyTorch, a SavedModel, or a model registry"
+        ),
+    )
+    champion_source.add_argument(
+        "--champion-col",
+        help=(
+            "Column in --data holding the champion's predictions for the same rows, in "
+            "the same form as the challenger's. The route when the champion cannot be "
+            "loaded in this environment — score it in its own and pass the result"
+        ),
+    )
+    parser.add_argument(
+        "--champion-sha256",
+        help=(
+            "Pin the --champion file. Checked before anything is loaded: a mismatch "
+            "refuses to unpickle and exits 1"
+        ),
+    )
+    parser.add_argument(
+        "--champion-features",
+        help=(
+            "Comma-separated columns the champion was fitted on, when the model does not "
+            "record them. --data carries the union of both models' features"
+        ),
+    )
+    parser.add_argument(
+        "--champion-decision-threshold",
+        type=float,
+        help="The cut-off the champion is operated at, if it differs from the challenger's",
+    )
     parser.add_argument(
         "--metric",
         choices=[AUTO, *sorted(BUILTIN_METRICS)],
@@ -376,6 +419,25 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("-v", "--verbose", action="store_true", help="Enable debug-level logging")
     return parser
+
+
+def _load_champion(args, predictions):
+    """The `Champion` the flags describe, or None when no champion was named."""
+    if args.champion_sha256 and not args.champion:
+        raise BDPModelGateError("--champion-sha256 pins a --champion file; none was given")
+    from .champion import Champion
+
+    options: dict[str, Any] = {
+        "features": _split_labels(args.champion_features),
+        "decision_threshold": args.champion_decision_threshold,
+    }
+    if args.champion:
+        return Champion.from_file(args.champion, sha256=args.champion_sha256, **options)
+    if args.champion_loader:
+        return Champion.from_loader(args.champion_loader, **options)
+    if predictions is not None:
+        return Champion(predictions=predictions, name=args.champion_col, **options)
+    return None
 
 
 def _apply_config_overrides(gate_config, overrides: dict[str, Any]):
@@ -447,6 +509,7 @@ def main(argv=None) -> int:
         expected_loss = _side_column("expected-loss-col", args.expected_loss_col)
         exposure = _side_column("exposure-col", args.exposure_col)
         baseline_pred = _side_column("baseline-col", args.baseline_col)
+        champion_pred = _side_column("champion-col", args.champion_col)
 
         X = df.drop(columns=drop_cols)
         y_pred = _predict(model, X, args.task)
@@ -472,6 +535,7 @@ def main(argv=None) -> int:
             overrides = _load_structured_config_file(args.config)
             gate_config = _apply_config_overrides(gate_config, overrides)
         gate_config = _apply_cli_overrides(gate_config, args)
+        champion = _load_champion(args, champion_pred)
 
         context = StructuredGateContext(
             model=model,
@@ -486,6 +550,7 @@ def main(argv=None) -> int:
             expected_loss=expected_loss,
             exposure=exposure,
             baseline_pred=baseline_pred,
+            champion=champion,
             generate_fn=_load_text_fn(args.generate_loader, "--generate-loader"),
             inject_fn=_load_text_fn(args.inject_loader, "--inject-loader"),
             canaries=_load_canaries(args.canaries_file),
@@ -494,7 +559,9 @@ def main(argv=None) -> int:
             favourable_classes=_split_labels(args.favourable_classes),
         )
 
-        report = ModelGate(checks=default_structured_checks(gate_config)).run(context)
+        report = ModelGate(checks=default_structured_checks(gate_config), config=gate_config).run(
+            context
+        )
 
     except GateValidationError as exc:
         logger.error("invalid gate input: %s", exc)

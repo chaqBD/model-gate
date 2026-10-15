@@ -35,8 +35,10 @@ logger = get_logger("reporting")
 #: there says the evidence behind everything below it is unsound — a model
 #: graded on its own training data reports a superb score and a clean
 #: calibration curve. Then what stops a deploy outright, then what a human
-#: has to weigh.
-CATEGORY_ORDER = ("validation", "performance", "compliance", "security", "fairness")
+#: has to weigh. The comparison sits straight after validation when there is a
+#: champion: "is it better than what it replaces?" is the first question a
+#: reviewer of a replacement asks.
+CATEGORY_ORDER = ("validation", "comparison", "performance", "compliance", "security", "fairness")
 
 _VERDICT_BLURB = {
     "PASS": "Every check passed. No action required before promotion.",
@@ -221,6 +223,16 @@ def render_html(
         facts.append(("Task", report.task))
     if report.model_metric is not None and report.model_score is not None:
         facts.append((report.model_metric, f"{report.model_score:.4f}"))
+    comparison = report.comparison
+    if comparison is not None and "delta" in comparison:
+        facts.append(
+            (
+                f"Δ {comparison['metric']} vs champion",
+                f"{comparison['delta']:+.4f} ({comparison['outcome'].replace('_', '-')})",
+            )
+        )
+    if report.champion_report is not None:
+        facts.append(("Champion's own gate", report.champion_report.gate_status))
     facts.append(("Checks run", str(len({r.check_name for r in report.results}))))
     facts.append(("Duration", f"{report.total_duration_ms:.0f} ms"))
     for name, value in facts:
