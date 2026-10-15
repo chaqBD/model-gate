@@ -9,10 +9,10 @@ central fact about them is that **they cannot all hold at once**.
 | **Separation** | Do *error* rates match across groups? | `equalised_odds` |
 | **Sufficiency** | Does a given score mean the same thing for every group? | `subgroup_calibration` |
 
-Before 0.5.0 this library measured only independence. That was not a neutral
-position — demographic parity ignores `y_true` entirely, so a model can
-achieve perfect parity by being wrong in compensating directions, and a reader
-seeing one green check had no way to know two other notions were never tested.
+Measuring only independence would not be a neutral position — demographic
+parity ignores `y_true` entirely, so a model can achieve perfect parity by being
+wrong in compensating directions, and a reader seeing one green check would have
+no way to know two other notions were never tested. So all three are reported.
 
 ## Independence — `disparate_impact`
 

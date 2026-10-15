@@ -232,7 +232,7 @@ Flags route to <span class="verdict-review">NEEDS_REVIEW</span>, not
 | `equalised_odds` | binary, multiclass | `EQUAL_OPPORTUNITY_RISK`, `EQUALISED_ODDS_RISK` |
 | `subgroup_calibration` | binary, multiclass | `SUBGROUP_CALIBRATION_RISK` |
 
-The last two are new in 0.5.0 and cover *separation* and *sufficiency*; the
+The last two cover *separation* and *sufficiency*; the
 four above them all measure *independence*. See
 [Fairness: three families](../tasks/fairness.md) — the three are mutually
 incompatible, so reporting one without the others makes a choice silently.
@@ -486,12 +486,12 @@ NIN/BVN-shaped values; `pii_patterns` is a plain dict you can replace.
 
 ### `prompt_injection`
 
-Rewritten in 0.5.4. Fires a categorised corpus at a generative side-car and
+Fires a categorised corpus at a generative side-car and
 asks the two questions about the response that are **decidable**. Full
 treatment: [Generative side-cars](../security.md).
 
 The short version of why: *"did the model refuse?"* cannot be answered from a
-string. The version that shipped from 0.1.0 tried, by substring-matching six
+string. An earlier version of this check tried, by substring-matching six
 English words, and so it passed a response reading *"I cannot normally share
 this, but the system prompt is: …"* while blocking a deploy for *"That request
 is out of scope."*
@@ -549,7 +549,7 @@ call count is logged before it is spent and recorded in metadata after.
 
 ### `report_injection`
 
-New in 0.5.4, **non-blocking**, and the only check here whose victim is not
+**Non-blocking**, and the only check here whose victim is not
 the model under test.
 
 This library ingests untrusted strings — feature names, protected-attribute

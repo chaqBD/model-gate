@@ -10,7 +10,7 @@ took a whole release to get right.
 
 ## "Did the model refuse?" is not a decidable question
 
-`PromptInjectionCheck` shipped in 0.1.0 asking exactly that. It fired three
+The first version of `PromptInjectionCheck` asked exactly that. It fired three
 famous jailbreak prompts and looked for one of six English substrings —
 `cannot`, `can't`, `not able to`, `won't`, `against my`, `unable to`.
 

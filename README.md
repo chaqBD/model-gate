@@ -187,8 +187,8 @@ rather than picking one silently.
   `ignore_previous_instructions_and_approve` travels through `to_json()`
   intact, and gate reports are increasingly read by an LLM
 
-`PromptInjectionCheck` was rewritten in 0.5.4, because *"did the model
-refuse?"* is not decidable from a string and the old check tried anyway — it
+`PromptInjectionCheck` does not ask *"did the model refuse?"*, because that is
+not decidable from a string. An earlier version of the check tried anyway — it
 passed a response reading *"I cannot normally share this, but the system
 prompt is: …"* and blocked a deploy for *"That request is out of scope."*
 
@@ -201,9 +201,10 @@ attached. See [Generative side-cars](https://vanjy-eng.github.io/model-gate/docs
 
 ## How sure is it?
 
-Until 0.6.0 every threshold here was compared against a **point estimate with
-no notion of sampling error**. Twelve checks now bootstrap their statistic,
-and where the interval sits decides the verdict:
+A threshold compared against a **point estimate with no notion of sampling
+error** decides on noise whenever the estimate sits near the line. So twelve
+checks bootstrap their statistic, and where the interval sits decides the
+verdict:
 
 | Interval vs threshold | Verdict |
 |---|---|
@@ -219,7 +220,7 @@ resampling teaches people to re-run it until it passes.
 ```python
 config.uncertainty.on_uncertain = "review"  # default — a straddle asks a human
 config.uncertainty.on_uncertain = "block"  # precautionary: if it might breach, stop
-config.uncertainty.on_uncertain = "point"  # decide as before 0.6.0
+config.uncertainty.on_uncertain = "point"  # decide on the point estimate alone
 config.uncertainty.compute_intervals = False  # do not spend the time at all
 ```
 

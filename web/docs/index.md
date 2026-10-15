@@ -71,7 +71,7 @@ whether the shortfall sits in one decile, whether the rating structure orders
 risk at all, whether premium still rises with prior claims, or who gets a 30%
 increase. See [Insurance pricing](tasks/insurance.md).
 
-The security row changed shape in 0.5.4. `prompt_injection` no longer asks
+`prompt_injection` does not ask
 *"did the model refuse?"* — a question no string can answer — and it tests
 both the direct and the **indirect** surface, which is where the realistic
 attack against a regulated pipeline arrives. `report_injection` is the odd

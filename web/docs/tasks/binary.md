@@ -76,9 +76,9 @@ the features and `distance_to_branch_km` will happily reconstruct it.
 
 !!! warning "Demographic parity needs hard labels"
     It counts predictions equal to `1`. Continuous predictions are binarised
-    for you at `FairnessConfig.decision_threshold`. Before 0.2.1 they were
-    not, and the check silently reported `0.000` for any probability
-    `y_pred` — perfectly fair, however skewed the model.
+    for you at `FairnessConfig.decision_threshold`. Without that step the
+    check would silently report `0.000` for any probability `y_pred` —
+    perfectly fair, however skewed the model.
 
 ## The `"auto"` metric fallback
 

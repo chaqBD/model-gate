@@ -1,3 +1,7 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>BDP Model Gate</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -197,7 +201,18 @@
   }
   .masthead nav a { color: var(--ink-muted); text-decoration: none; }
   .masthead nav a:hover { color: var(--accent); }
-  @media (max-width: 640px) { .masthead nav a.optional { display: none; } }
+  /* Nothing in the masthead wraps: at phone width "BDP Model Gate" and
+     "Getting started" each broke onto two lines inside a 60px bar. */
+  .wordmark, .masthead nav a { white-space: nowrap; }
+  @media (max-width: 640px) {
+    .masthead nav a.optional { display: none; }
+    .masthead-inner { gap: .75rem; }
+    .masthead nav { gap: 1rem; }
+  }
+  /* Below 400px the bar cannot hold the wordmark, the chip and both links.
+     The version stays in the colophon at the foot of the page. */
+  @media (max-width: 400px) { .wordmark .version { display: none; } }
+  @media (max-width: 360px) { .masthead nav { gap: .75rem; font-size: .8125rem; } }
 
   /* ---------- hero ---------- */
   .hero { padding-block: clamp(3rem, 8vw, 6rem) clamp(2rem, 4vw, 3rem); }
@@ -315,12 +330,18 @@
   .verdict p { font-size: .875rem; color: var(--ink-muted); }
 
   /* ---------- quadrant nav ---------- */
+  /* Four, two or one column — never three-and-an-orphan, which auto-fit
+     produced at tablet widths. grid-auto-rows: 1fr gives every card the
+     height of the tallest, across rows as well as within one. */
   .quad {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(238px, 1fr));
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    grid-auto-rows: 1fr;
     gap: 1rem;
     margin-top: 2rem;
   }
+  @media (max-width: 1000px) { .quad { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+  @media (max-width: 560px) { .quad { grid-template-columns: minmax(0, 1fr); } }
   .quad-card {
     background: var(--surface);
     border: 1px solid var(--rule);
@@ -335,9 +356,17 @@
   }
   .quad-card:hover { border-color: var(--accent); transform: translateY(-2px); color: var(--ink); }
   .quad-card h3 { font-size: 1.0625rem; }
-  .quad-card p { font-size: .875rem; color: var(--ink-muted); }
+  .quad-card p {
+    font-size: .875rem;
+    color: var(--ink-muted);
+    text-align: justify;
+    hyphens: auto; /* keeps justified lines in a narrow card from opening gaps */
+  }
+  /* Pinned to the foot of the card, so the links line up across a row
+     whatever the length of the text above them. */
   .quad-card .go {
-    margin-top: .35rem;
+    margin-top: auto;
+    padding-top: .35rem;
     font-family: var(--mono);
     font-size: .75rem;
     color: var(--accent);
@@ -408,7 +437,10 @@
     gap: clamp(1.5rem, 4vw, 3rem);
     align-items: start;
   }
-  @media (max-width: 860px) { .split { grid-template-columns: 1fr; } }
+  /* minmax(0, 1fr), not 1fr: a bare 1fr track cannot shrink below its widest
+     unbreakable content, so on a phone the code sample pushed the whole page
+     to 530px and everything scrolled sideways. The <pre> scrolls instead. */
+  @media (max-width: 860px) { .split { grid-template-columns: minmax(0, 1fr); } }
 
   pre {
     margin: 0;
@@ -598,12 +630,12 @@
     <div class="quad">
       <a class="quad-card" href="docs/getting-started/">
         <h3>Getting started</h3>
-        <p>Install, gate your first model, and read the report. Ten minutes end to end.</p>
+        <p>Install the package, gate your first model, and read the report it produces.</p>
         <span class="go">Start here →</span>
       </a>
-      <a class="quad-card" href="docs/concepts/">
+      <a class="quad-card" href="docs/">
         <h3>User guide</h3>
-        <p>Tasks, metrics, thresholds, custom checks, plugins and the CI/CD gate.</p>
+        <p>Concepts, every task, any model framework, replacing a model, and generative side-cars.</p>
         <span class="go">Read the guide →</span>
       </a>
       <a class="quad-card" href="docs/reference/api/">
@@ -613,7 +645,7 @@
       </a>
       <a class="quad-card" href="docs/examples/">
         <h3>Examples</h3>
-        <p>Nine runnable notebooks: binary, multiclass, regression, PyTorch, boosters, reports, insurance pricing, generative side-cars, and replacing a model.</p>
+        <p>Runnable notebooks for every task, framework and report, committed with their outputs.</p>
         <span class="go">Open the notebooks →</span>
       </a>
     </div>
@@ -866,7 +898,7 @@ report.to_json(<span class="c-str">"gate_report.json"</span>)
         <h4>Docs</h4>
         <ul>
           <li><a href="docs/getting-started/">Getting started</a></li>
-          <li><a href="docs/concepts/">User guide</a></li>
+          <li><a href="docs/">User guide</a></li>
           <li><a href="docs/reference/api/">API reference</a></li>
           <li><a href="docs/examples/">Examples</a></li>
         </ul>
