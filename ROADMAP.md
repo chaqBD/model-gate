@@ -335,10 +335,10 @@ them in a pipeline.
 `Champion` accepts four sources, most to least convenient:
 
 ```python
-Champion.from_file("v3.joblib")              # a file; format chosen by extension
-Champion(model=estimator)                    # an object already in memory
-Champion(predict_fn=fn, predict_proba_fn=fn) # the same callables ModelAdapter takes
-Champion(predictions=y_old, proba=p_old)     # scores computed elsewhere, same rows
+Champion.from_file("v3.joblib")  # a file; format chosen by extension
+Champion(model=estimator)  # an object already in memory
+Champion(predict_fn=fn, predict_proba_fn=fn)  # the same callables ModelAdapter takes
+Champion(predictions=y_old, proba=p_old)  # scores computed elsewhere, same rows
 ```
 
 `from_file` dispatches on extension and imports lazily, so the core install
@@ -361,7 +361,7 @@ guess produces plausible numbers rather than an error. So those formats use
 the mechanism the CLI already has:
 
 ```python
-Champion.from_loader("mypkg.serving:load_v3")   # returns a model or fn(DataFrame) -> array
+Champion.from_loader("mypkg.serving:load_v3")  # returns a model or fn(DataFrame) -> array
 ```
 
 ```bash
