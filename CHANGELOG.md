@@ -8,10 +8,56 @@ All notable changes to this project are documented here. Format follows
 
 ## [0.7.0] - unreleased
 
-Making the mutation score mean what it says.
+Champion against challenger — and making the mutation score mean what it says.
 
-Nothing here changes a verdict, a score or a public API — it is entirely
-tests, CI and the prose describing them. It gets an entry because the
+### Is it better than what it replaces?
+
+The gate answered one question: *is this model good enough?* A replacement
+raises a second one that governance usually cares about more — **is it better
+than the model already in production, and better for whom?** A challenger
+could clear every absolute threshold and still be worse than the champion, and
+nothing noticed.
+
+Pass `champion=Champion.from_file("v3.joblib")` and the gate scores both
+models on the same rows and adds seven comparison checks. Notebook 09 shows the
+case this exists for: a new scorecard whose AUC is better by +0.079, interval
+[+0.061, +0.096] — after a version that was better overall by +0.046 and worse
+by 0.135 AUC for broker-sourced loans, because a join had dropped them from its
+training data. The headline number could not show that; `subgroup_regression`
+did.
+
+**No existing verdict changes.** Every comparison check reports
+`NOT_APPLICABLE` without a champion, `--baseline-col` is deliberately *not* an
+alias for the new `--champion-col`, and the challenger still runs the whole
+gate — the comparison is added on top. A challenger that beats a bad champion
+is still `BLOCKED` if it fails on its own terms.
+
+Four decisions worth knowing before reading the code:
+
+- **One interval, on the difference.** Each bootstrap resample scores both
+  models on the same rows. Checking whether two separate intervals overlap is
+  the tempting alternative, and `tests/test_comparison.py` measures why it is
+  wrong: for two closely related models it finds a real improvement whose
+  separate intervals overlap, while the paired interval excludes zero at under
+  half the width of either.
+- **Non-inferiority by default.** A challenger must not be materially worse —
+  by default 1% of the champion's score, which is unit-free where an absolute
+  0.01 would mean nothing for RMSE. `require="superior"` makes a merely equal
+  challenger block.
+- **PyTorch gets a loader, not a guess.** `.joblib`/`.pkl`, `.skops`, `.onnx`
+  and `.keras` load by extension; a `.pt` file is refused with a pointer to
+  `Champion.from_loader`, because a `state_dict` needs code and a tensor
+  conversion is the caller's choice.
+- **The traps fail loudly.** A version warning while unpickling is an error —
+  an old pickle that loads with a warning is a subtly different model — and
+  the message names `Champion(predictions=...)` as the way out. `sha256=` is
+  checked *before* anything is deserialised. An inverted label encoding, which
+  reads as a huge improvement, blocks.
+
+### The mutation score
+
+Nothing in this part changes a verdict, a score or a public API — it is
+entirely tests, CI and the prose describing them. It gets an entry because the
 headline figure in `CONTRIBUTING.md` moved from 42.0% to 54.4% without a
 single assertion being added for most of that jump, and a number that moves
 for reasons unrelated to the tests is exactly the kind of thing this project
@@ -68,6 +114,16 @@ existed.** Anyone working that backlog would have written tests twice.
   bootstrap draw is what `uncertainty` treats as "this draw is not evidence".
 
 ### Changed
+- `DislocationCheck` reads the champion's predictions when `baseline_pred` is
+  absent, and records which one it used as `baseline_source`. A supplied
+  `baseline_pred` still wins: it may be the premium actually charged.
+- The default suite is 33 checks across six categories, up from 26 across
+  five. Reports order `comparison` straight after `validation`, and
+  `GateReport` gains `comparison` (in `to_dict()` too, when there is a
+  champion) and a `vs champion` line in `summary()`.
+- The CLI now passes its `GateConfig` to `ModelGate` as well as to the checks,
+  so settings read by the gate itself — `comparison.gate_champion` — take
+  effect from a `--config` file.
 - Mutants are tested against the whole suite, less the three files that test
   the repository rather than the package. No mutant can change their outcome,
   and `tests/test_documentation.py` cannot collect inside `mutants/` because
@@ -85,6 +141,33 @@ existed.** Anyone working that backlog would have written tests twice.
   `CONTRIBUTING.md` — including the estimate that set the box it then overran.
 
 ### Added
+- **`Champion`** — the model being replaced, from a file
+  (`Champion.from_file`, with `sha256=` pinning), a `"pkg.module:factory"`
+  loader, an object, a `predict_fn`, or predictions scored elsewhere. Carries
+  its provenance — loader, hash, size, pinned or not, and the scikit-learn
+  version it was saved with — into the report.
+- **`StructuredGateContext.champion`** and **seven comparison checks**:
+  `comparison_integrity`, `challenger_performance` and `challenger_guardrails`
+  (blocking); `subgroup_regression`, `fairness_delta`, `decision_churn` and
+  `operational_delta` (non-blocking). New flags: `COMPARISON_INTEGRITY_RISK`,
+  `CHALLENGER_WORSE`, `CHALLENGER_NOT_BETTER`, `SUBGROUP_WORSE`,
+  `FAIRNESS_WORSE`, `DECISION_CHURN`, `OPERATIONAL_COST_RISK`. An improvement
+  is `OK` with `outcome: improved` in the metadata, not a flag: a non-OK flag
+  routes to a person, and a better model should not.
+- **`ComparisonConfig`** on `GateConfig.comparison` — the metric, an absolute
+  or relative margin, `require`, guardrails (a dict gives each its own absolute
+  margin, which a calibration measure needs), segments, and tolerances for
+  disparity widening, break rate, latency and cost. `gate_champion=True` also
+  runs the absolute checks on the champion and reports its verdict beside the
+  challenger's — informational only, never part of the status.
+- Two charts: each group's Δ against its margin (`subgroup_regression`) and
+  the fixes-and-breaks matrix (`decision_churn`).
+- CLI: `--champion`, `--champion-loader`, `--champion-col` (mutually
+  exclusive), `--champion-sha256`, `--champion-features` and
+  `--champion-decision-threshold`.
+- `examples/09_champion_challenger.ipynb`, and a
+  [Replacing a model](https://vanjy-eng.github.io/model-gate/docs/comparison/)
+  guide.
 - 22 tests, each written against a specific survivor and each verified by
   applying the mutant to the source and watching the test fail.
   `tests/test_uncertainty.py` covers the `min_rows` floor at its boundary, the

@@ -232,8 +232,8 @@ context = StructuredGateContext(
 )
 
 report = ModelGate().run(context)
-print(report.comparison.summary())
-# roc_auc  challenger 0.842  champion 0.821  Δ +0.021 [+0.008, +0.034]  IMPROVED
+print(report.summary())
+# vs champion: roc_auc 0.7304 against 0.6517, Δ +0.0786 [+0.0614, +0.0955] -> improved
 ```
 
 ```bash
@@ -274,12 +274,16 @@ interval.** `Δ` is signed so that positive always means "challenger better",
 using the `greater_is_better` that `MetricSpec` already carries, so RMSE and
 AUC read the same way. Against a margin `δ`:
 
-| Interval of Δ | Flag | Blocking |
-|---|---|---|
-| entirely above `+min_improvement` | `IMPROVED` | — |
-| entirely above `−δ` | `NON_INFERIOR` (OK) | — |
-| straddles `−δ` | `UNCERTAIN` | no, and `on_uncertain` applies |
-| entirely below `−δ` | `REGRESSION` | **yes** |
+| Interval of Δ | Outcome | Flag | Blocking |
+|---|---|---|---|
+| entirely above `+min_improvement` | improved | `OK` | — |
+| entirely above `−δ` | non-inferior | `OK` | — |
+| straddles `−δ` | uncertain | `UNCERTAIN` | no, and `on_uncertain` applies |
+| entirely below `−δ` | worse | `CHALLENGER_WORSE` | **yes** |
+
+The outcome is recorded in metadata; only the last two rows are flags. An
+improvement is not a finding, and a non-OK flag would route every better model
+to a person.
 
 `ComparisonConfig.require` decides what counts as enough:
 
@@ -287,8 +291,8 @@ AUC read the same way. Against a margin `δ`:
   Retraining on fresh data, a cheaper model, a simpler one or one that drops a
   contested feature are all legitimate reasons to replace a model that is not
   measurably better. Requiring improvement by default would block every one.
-- `"superior"`: the challenger must be measurably better, and `NON_INFERIOR`
-  becomes `NOT_IMPROVED`, blocking. This is for teams whose change process
+- `"superior"`: the challenger must be measurably better, and a non-inferior
+  one becomes `CHALLENGER_NOT_BETTER`, blocking. This is for teams whose change process
   says a replacement must earn its risk.
 
 **4. The default margin is relative, because no absolute default is honest.**
@@ -306,7 +310,7 @@ secondary metrics that must not regress: Brier or ECE beside AUC, and the
 Lorenz Gini and A/E on a pricing model. Every extra guardrail is another
 chance for sampling noise to block a deploy, so guardrail intervals are
 Bonferroni-widened across the guardrail count. They block only on
-`REGRESSION`; a straddle is `UNCERTAIN`, non-blocking.
+`CHALLENGER_WORSE`; a straddle is `UNCERTAIN`, non-blocking.
 
 ### The checks
 
@@ -315,7 +319,7 @@ question a reviewer of a replacement asks first.
 
 | Check | Blocking | What it asks |
 |---|---|---|
-| `ComparisonIntegrityCheck` | yes | Can these two models be compared at all? Same task; the **same class set in the same order** (a champion with `classes_ = ["no", "yes"]` and a challenger with `["yes", "no"]` produce a confident, inverted comparison and no error); the same label encoding; the champion artifact matches its pinned `sha256`; both models accept the frame. |
+| `ComparisonIntegrityCheck` | yes | Can these two models be compared at all? Same task; the **same class set in the same order** (a champion with `classes_ = ["no", "yes"]` and a challenger with `["yes", "no"]` produce a confident, inverted comparison and no error); the same label encoding; scores that do not rank the outcome backwards; probabilities against probabilities under a ranking metric; the champion can score the frame at all. |
 | `ChallengerPerformanceCheck` | yes | Primary metric Δ with its paired interval, read by the table above. |
 | `ChallengerGuardrailCheck` | on regression | Each guardrail metric's Δ, widened for multiplicity. |
 | `SubgroupRegressionCheck` | no | Better on average and worse for someone? Δ per protected group and per `ComparisonConfig.segments` column. An aggregate improvement routinely hides a segment that got worse, and that is a judgement call, so it routes to review like the fairness checks. |
@@ -338,7 +342,7 @@ them in a pipeline.
 Champion.from_file("v3.joblib")  # a file; format chosen by extension
 Champion(model=estimator)  # an object already in memory
 Champion(predict_fn=fn, predict_proba_fn=fn)  # the same callables ModelAdapter takes
-Champion(predictions=y_old, proba=p_old)  # scores computed elsewhere, same rows
+Champion(predictions=y_old)  # scored elsewhere: same rows, same form as y_pred
 ```
 
 `from_file` dispatches on extension and imports lazily, so the core install
@@ -392,15 +396,16 @@ wrong champion is worse than none. So:
 controls, so this is acceptable, but it should be a visible choice. The
 report records it: `Champion.describe()` gives the loader used, the file's
 `sha256` and size, and any framework version found in the artifact.
-`sha256=` pins the artifact, and a mismatch blocks through
-`ComparisonIntegrityCheck`. That makes "the model we compared against is the
+`sha256=` pins the artifact, and it is checked **before** anything is
+deserialised: a mismatch refuses to load, so unknown bytes never run. That makes "the model we compared against is the
 one actually in production" something the record proves, not something it
 assumes. `.skops` is recommended in the docs for new champions.
 
 **Different feature sets are normal.** A challenger usually adds features. `X`
 carries the union; each model gets its own columns from its fitted
 `feature_names_in_`, or from `Champion(features=[...])` when the model does not
-record them. `FeatureContractCheck` runs against both.
+record them. A column the champion needs and `X` lacks blocks through
+`ComparisonIntegrityCheck`.
 
 **Different operating points are normal too.** The champion may have been run
 at a cut-off of 0.42. `Champion(decision_threshold=0.42)` means churn and
@@ -418,10 +423,10 @@ because it roughly doubles the run time.
 
 ### The report
 
-- A comparison section in `to_html()`, above the per-check detail. It shows a
-  forest plot of every Δ with its interval and the `−δ` line (the check's
-  `plot()` override, per the existing convention), the 2×2 fixes/breaks
-  matrix, and the champion's provenance block.
+- A comparison section in `to_html()`, straight after validation, with the
+  headline Δ in the verdict card. Two charts, per the existing `plot()`
+  convention: each group's Δ against its margin, and the 2×2 fixes/breaks
+  matrix. The champion's provenance is on the integrity result.
 - `report.comparison` in Python, and `"comparison"` in `to_json()`, holding the
   champion's description, the margin actually used (and whether it was
   relative), `require`, and each Δ with its interval.
@@ -441,20 +446,20 @@ because it roughly doubles the run time.
 ### Tests the 0.4.2 guards demand
 
 - **Known answers.** A champion identical to the challenger gives Δ = 0,
-  churn = 0 and `NON_INFERIOR` at the default margin. A champion equal to the
-  challenger plus fixed noise gives `IMPROVED`, and the reverse gives
-  `REGRESSION`.
+  churn = 0 and non-inferior at the default margin. A noisier champion gives
+  improved, and the reverse gives `CHALLENGER_WORSE`.
 - **Invariants.** Antisymmetry: swapping the two models negates every Δ and
-  swaps fixes with breaks exactly. Row order: permuting the validation set
-  cannot move a verdict (the existing invariant, extended). Paired
-  intervals are never wider than unpaired ones on correlated models.
+  swaps fixes with breaks exactly — the interval only to within resampling
+  noise, because the resample order is derived from row content. Row order
+  cannot move a verdict. On two closely related models, the paired interval
+  excludes zero where the separate intervals overlap.
 - **Traps, each with a test that fails without the guard.** Inverted
   `classes_` order; a `sha256` mismatch; an `InconsistentVersionWarning` on
   load; a `.pt` path passed to `from_file`; a margin of zero.
-- **Model-family matrix.** Binary, multiclass and regression, each with a
-  file-loaded champion, an in-memory one and a predictions-only one. ONNX and
-  Keras loaders run in the matrix only where the optional dependency is
-  installed, and are skipped visibly otherwise.
+- **Every task.** Binary, multiclass and regression through the full default
+  suite with an in-memory champion; predictions-only and file-loaded champions
+  in their own tests. The skops, ONNX and Keras loaders are tested against
+  stand-in modules, so they run on every install.
 
 ### The rest of the slice
 
@@ -466,24 +471,66 @@ because it roughly doubles the run time.
   the landing page's checks grid gains the `comparison` category, which
   `tests/test_package.py` will require.
 - **CLI:** `--champion`, `--champion-loader`, `--champion-col`,
-  `--champion-proba-cols`, `--champion-sha256`,
-  `--champion-decision-threshold`. `--baseline-col` keeps working as an alias
-  of `--champion-col` for `DislocationCheck` users.
+  `--champion-sha256`, `--champion-features`, `--champion-decision-threshold`.
 - **Config:** `ComparisonConfig` in JSON/YAML/TOML like every other section.
+
+### Where the build departed from this plan
+
+Recorded rather than silently corrected, so the reasons survive:
+
+- **A pinned hash is checked before loading, not by a check.** The plan had a
+  mismatch block through `ComparisonIntegrityCheck` — after the pickle had
+  already run. Refusing to deserialise is the only version that protects
+  anything.
+- **`--baseline-col` is not an alias for `--champion-col`.** An alias would
+  have switched the comparison on for every existing pipeline that passes
+  `--baseline-col`, including a blocking check it never asked for. That is a
+  verdict change by stealth.
+- **`Champion(predictions=...)` takes one argument**, in the same form as
+  `y_pred`, and `--champion-proba-cols` was dropped. A second `proba=` would
+  have been a second way to describe the same thing.
+- **`FeatureContractCheck` is not run against the champion.** Each model is
+  handed its own columns; one the champion needs and `X` lacks blocks through
+  the integrity check, which is the failure that matters.
+- **Improvements are `OK` with an outcome in metadata**, and the risk flags
+  are `CHALLENGER_WORSE` / `CHALLENGER_NOT_BETTER` — not `REGRESSION`, which
+  reads as the task.
+- **Guardrails take a dict of absolute margins.** A relative margin on an ECE
+  of 0.03 is 0.0003, inside its noise, so the list-only form made every
+  calibration guardrail `UNCERTAIN`.
+- **`max_break_rate` defaults to 10%, not 5%.** An ordinary retrain that gains
+  a few points of AUC breaks a few percent of decisions while fixing more, and
+  5% fired on it.
+- **`--champion-features`** was added: a champion fitted without
+  `feature_names_in_` otherwise has no way to say which columns are its own.
+
+Found while building, and **not fixed on this branch** because each changes
+existing verdicts and deserves its own entry:
+
+- `PerformanceThresholdCheck` binds an exposure weight vector to the full
+  frame, so on every bootstrap resample the weights land on the wrong rows. An
+  exposure-weighted RMSE of 5.36 reported an interval of [131.8, 180.7]. The
+  comparison passes weights per resample and is unaffected.
+- `to_class_labels` reads a probability matrix's columns in `class_order`,
+  while scikit-learn's `predict_proba` orders them alphabetically and
+  `calibration_checks` assumes the alphabetical order. With
+  `class_order=["decline", "refer", "accept"]` a 99%-accurate model scores
+  0.3%.
 
 ### Checklist
 
-- [ ] `Champion` with `from_file`, `from_loader`, `model=`, `predict_fn=`,
+- [x] `Champion` with `from_file`, `from_loader`, `model=`, `predict_fn=`,
       `predictions=`; lazy extension dispatch; version warnings as errors
-- [ ] Paired Δ statistic on top of `uncertainty.bootstrap`, signed by
+- [x] Paired Δ statistic on top of `uncertainty.bootstrap`, signed by
       `greater_is_better`
-- [ ] `ComparisonConfig`: `metric`, `margin`, `margin_relative`,
+- [x] `ComparisonConfig`: `metric`, `margin`, `margin_relative`,
       `min_improvement`, `require`, `guardrails`, `segments`, `gate_champion`
-- [ ] The seven checks above, in a new `comparison` category
-- [ ] `DislocationCheck` reads champion predictions when `baseline_pred` is absent
-- [ ] Provenance in `report.comparison`, JSON and HTML
-- [ ] CLI flags; `--baseline-col` aliased
-- [ ] Notebook 09, docs page, landing page, CHANGELOG
+- [x] The seven checks above, in a new `comparison` category
+- [x] `DislocationCheck` reads champion predictions when `baseline_pred` is absent
+- [x] Provenance in `report.comparison`, JSON and HTML
+- [x] CLI flags (`--baseline-col` deliberately left alone — see above)
+- [x] Notebook 09, docs page, landing page, CHANGELOG
+- [ ] Version bump to 0.7.0 and the site's version stamps, at release
 
 ## 0.8.0 — Release automation, in two stages
 

@@ -218,8 +218,9 @@ it across every interval-bearing check.
 2. Otherwise any flag at all → <span class="verdict-review">NEEDS_REVIEW</span>
 3. Otherwise → <span class="verdict-pass">PASS</span>
 
-Validation, performance, compliance and security are blocking. **Fairness is
-not.**
+Validation, performance, compliance and security are blocking, and so is the
+headline [comparison against a champion](comparison.md) when one is supplied.
+**Fairness is not.**
 
 That is a design stance, not an oversight. A proxy-correlation finding might
 be a genuine problem or a legitimate rating factor, and only someone who knows

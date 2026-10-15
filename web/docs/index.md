@@ -31,12 +31,14 @@ sign it off.
 - **[Tasks](tasks/binary.md)** — binary, multiclass and ordinal, regression,
   insurance pricing
 - **[Any model](models.md)** — scikit-learn, PyTorch, XGBoost, remote endpoints
+- **[Replacing a model](comparison.md)** — the challenger against the champion in
+  production: same rows, one interval on the difference
 - **[Generative side-cars](security.md)** — prompt injection, canaries, and the
   two surfaces
 - **[Reference](reference/checks.md)** — the checks, configuration, CLI, API
 - **[Reports and plots](reference/reports.md)** — the page a reviewer signs,
-  and the fourteen charts in it
-- **[Examples](examples/index.md)** — eight runnable notebooks
+  and the sixteen charts in it
+- **[Examples](examples/index.md)** — nine runnable notebooks
 
 </div>
 
@@ -45,6 +47,7 @@ sign it off.
 | Category | Blocking | Checks |
 |---|---|---|
 | Validation | Yes | target leakage, split overlap, validation strategy, feature contract, feature drift (review) |
+| Comparison | Yes, with a champion | integrity, challenger performance, guardrails; subgroup regression, fairness delta, decision churn, operational cost (review) |
 | Fairness | No → review | proxy correlation, demographic parity, SHAP subgroup gaps, counterfactual flip, equalised odds, subgroup calibration |
 | Fairness (regression) | No → review | loss-ratio parity, group mean gap, error parity, calibration parity |
 | Performance | Yes | model score, calibration, p95 latency, cost per inference, actual-vs-expected, risk discrimination |
