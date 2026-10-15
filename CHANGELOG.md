@@ -6,7 +6,7 @@ All notable changes to this project are documented here. Format follows
 
 ## [Unreleased]
 
-## [0.6.1] - unreleased
+## [0.7.0] - unreleased
 
 Making the mutation score mean what it says.
 
@@ -1448,7 +1448,7 @@ in 0.4.0; example notebooks in 0.4.1.
 - Azure Pipelines and GitHub Actions pre-deployment gate examples.
 
 [Unreleased]: https://github.com/vanjy-eng/model-gate/compare/v0.6.0...HEAD
-[0.6.1]: https://github.com/vanjy-eng/model-gate/compare/v0.6.0...main
+[0.7.0]: https://github.com/vanjy-eng/model-gate/compare/v0.6.0...main
 [0.6.0]: https://github.com/vanjy-eng/model-gate/compare/v0.5.4...v0.6.0
 [0.5.4]: https://github.com/vanjy-eng/model-gate/compare/v0.5.3...v0.5.4
 [0.5.3]: https://github.com/vanjy-eng/model-gate/compare/v0.5.2...v0.5.3
